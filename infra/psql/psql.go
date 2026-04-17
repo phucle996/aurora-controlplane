@@ -1,0 +1,67 @@
+package psql
+
+import (
+	"context"
+	"controlplane/internal/config"
+	"controlplane/pkg/logger"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// NewPostgres creates a ready-to-use PostgreSQL connection pool.
+// Flow: build DSN → parse config → create pool → ping → return
+func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error) {
+	dsn := buildDSN(cfg)
+
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("psql: failed to parse config: %w", err)
+	}
+
+	poolCfg.MaxConns = int32(cfg.MaxConns)
+	poolCfg.MinConns = int32(cfg.MinConns)
+	poolCfg.MaxConnLifetime = cfg.MaxConnLife
+	poolCfg.MaxConnIdleTime = cfg.MaxConnIdle
+
+	var pool *pgxpool.Pool
+
+	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
+		if err != nil {
+			logger.SysWarn("infra.psql", "connect_failed", fmt.Sprintf("psql: connection attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err), "")
+			if attempt < cfg.MaxRetries {
+				time.Sleep(cfg.RetryInterval)
+			}
+			continue
+		}
+
+		pingCtx, pingCancel := context.WithTimeout(ctx, cfg.PingTimeout)
+		err = pool.Ping(pingCtx)
+		pingCancel()
+
+		if err != nil {
+			logger.SysWarn("infra.psql", "ping_failed", fmt.Sprintf("psql: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err), "")
+			pool.Close()
+			if attempt < cfg.MaxRetries {
+				time.Sleep(cfg.RetryInterval)
+			}
+			continue
+		}
+
+		logger.SysInfo("infra.psql", "connected", fmt.Sprintf("psql: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
+		return pool, nil
+	}
+
+	return nil, fmt.Errorf("psql: failed to connect after %d attempts: %w", cfg.MaxRetries, err)
+}
+
+// buildDSN constructs the connection string from typed config.
+// Never logs the full DSN (contains password).
+func buildDSN(cfg *config.PsqlCfg) string {
+	return fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode,
+	)
+}
