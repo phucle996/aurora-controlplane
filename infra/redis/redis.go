@@ -7,7 +7,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"os"
+	"strings"
 	"time"
 
 	goredis "github.com/redis/go-redis/v9"
@@ -52,11 +54,11 @@ func NewRedis(ctx context.Context, cfg *config.RedisCfg) (*Client, error) {
 		pingCancel()
 
 		if lastErr == nil {
-			logger.SysInfo("infra.redis", "connected", fmt.Sprintf("redis: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
+			logger.SysInfo("infra.redis", fmt.Sprintf("redis: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
 			return &Client{rdb: rdb}, nil
 		}
 
-		logger.SysWarn("infra.redis", "ping_failed", fmt.Sprintf("redis: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, lastErr), "")
+		logger.SysWarn("infra.redis", fmt.Sprintf("redis: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, lastErr))
 		_ = rdb.Close()
 
 		if attempt < cfg.MaxRetries {
@@ -80,6 +82,12 @@ func (c *Client) Close() error {
 // buildTLSConfig constructs TLS config from typed config.
 func buildTLSConfig(cfg *config.RedisCfg) (*tls.Config, error) {
 	tlsCfg := &tls.Config{}
+
+	host := cfg.Addr
+	if parsedHost, _, err := net.SplitHostPort(cfg.Addr); err == nil {
+		host = parsedHost
+	}
+	tlsCfg.ServerName = strings.TrimSpace(host)
 
 	if cfg.CACertPath != "" {
 		caCert, err := os.ReadFile(cfg.CACertPath)

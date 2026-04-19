@@ -1,23 +1,13 @@
-DROP INDEX IF EXISTS iam.idx_iam_refresh_tokens_expires_at;
-DROP INDEX IF EXISTS iam.idx_iam_refresh_tokens_session_id_status;
-DROP INDEX IF EXISTS iam.idx_iam_refresh_tokens_session_id;
-DROP INDEX IF EXISTS iam.idx_iam_refresh_tokens_token_hash;
-DROP INDEX IF EXISTS iam.idx_iam_sessions_user_id_last_seen_at;
-DROP INDEX IF EXISTS iam.idx_iam_sessions_expires_at;
-DROP INDEX IF EXISTS iam.idx_iam_sessions_device_id;
-DROP INDEX IF EXISTS iam.idx_iam_sessions_user_id;
-DROP INDEX IF EXISTS iam.idx_iam_devices_proof_key_thumbprint;
-DROP INDEX IF EXISTS iam.idx_iam_devices_trusted;
-DROP INDEX IF EXISTS iam.idx_iam_devices_user_id_last_seen_at;
-DROP INDEX IF EXISTS iam.idx_iam_devices_user_id;
+DROP INDEX IF EXISTS iam.idx_iam_audit_logs_created_at;
+DROP INDEX IF EXISTS iam.idx_iam_audit_logs_action;
+DROP INDEX IF EXISTS iam.idx_iam_audit_logs_user_id;
+
 DROP INDEX IF EXISTS iam.idx_iam_user_roles_role_id;
 DROP INDEX IF EXISTS iam.idx_iam_role_permissions_permission_id;
-DROP INDEX IF EXISTS iam.idx_iam_permissions_code;
-DROP INDEX IF EXISTS iam.idx_iam_roles_is_system;
-DROP INDEX IF EXISTS iam.idx_iam_roles_code;
-DROP INDEX IF EXISTS iam.idx_iam_mfa_backup_codes_user_id_used_at;
-DROP INDEX IF EXISTS iam.idx_iam_mfa_backup_codes_user_id;
-DROP INDEX IF EXISTS iam.idx_iam_mfa_totp_credentials_enabled;
-DROP INDEX IF EXISTS iam.idx_iam_users_status;
-DROP INDEX IF EXISTS iam.idx_iam_users_email;
-DROP INDEX IF EXISTS iam.idx_iam_users_username;
+
+DROP INDEX IF EXISTS iam.idx_iam_recovery_codes_user_id;
+DROP INDEX IF EXISTS iam.idx_iam_mfa_settings_user_id;
+DROP INDEX IF EXISTS iam.idx_iam_webauthn_credentials_user_id;
+DROP INDEX IF EXISTS iam.idx_iam_refresh_tokens_device_id;
+DROP INDEX IF EXISTS iam.idx_iam_devices_user_id;
+DROP INDEX IF EXISTS iam.idx_iam_password_histories_user_id;

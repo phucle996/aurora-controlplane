@@ -48,7 +48,7 @@ func InitGRPC(ctx context.Context, cfg *config.Config) (*GRPC, error) {
 		cfg:   &cfg.GRPC,
 	}
 
-	logger.SysInfo("grpc", "start", fmt.Sprintf("grpc: server listener ready on :%s", cfg.GRPC.ServerPort))
+	logger.SysInfo("grpc", fmt.Sprintf("grpc: server listener ready on :%s", cfg.GRPC.ServerPort))
 
 	return &GRPC{
 		Server:  server,
@@ -60,16 +60,16 @@ func InitGRPC(ctx context.Context, cfg *config.Config) (*GRPC, error) {
 
 // Start begins serving gRPC (blocking — run in goroutine).
 func (g *GRPC) Start() error {
-	logger.SysInfo("grpc", "starting", "grpc: server starting...")
+	logger.SysInfo("grpc", "grpc: server starting...")
 	return g.Server.Serve(g.lis)
 }
 
 // Stop gracefully stops the gRPC server and closes all client connections.
 func (g *GRPC) Stop() {
-	logger.SysInfo("grpc", "stopping", "grpc: stopping server...")
+	logger.SysInfo("grpc", "grpc: stopping server...")
 	g.Server.GracefulStop()
 
-	logger.SysInfo("grpc", "closing_clients", "grpc: closing client connections...")
+	logger.SysInfo("grpc", "grpc: closing client connections...")
 	g.Clients.CloseAll()
 }
 
@@ -113,7 +113,7 @@ func (m *GRPCClientManager) Dial(ctx context.Context, serviceName, target string
 	}
 
 	m.conns[serviceName] = conn
-	logger.SysInfo("grpc_client", "connected", fmt.Sprintf("grpc: client connected to %s (%s)", serviceName, target))
+	logger.SysInfo("grpc_client", fmt.Sprintf("grpc: client connected to %s (%s)", serviceName, target))
 	return conn, nil
 }
 
@@ -130,7 +130,7 @@ func (m *GRPCClientManager) CloseAll() {
 	defer m.mu.Unlock()
 	for name, conn := range m.conns {
 		if err := conn.Close(); err != nil {
-			logger.SysError("grpc_client", "close_error", fmt.Sprintf("grpc: error closing client %s: %v", name, err), "")
+			logger.SysError("grpc_client", fmt.Sprintf("grpc: error closing client %s: %v", name, err))
 		}
 	}
 	m.conns = make(map[string]*grpc.ClientConn)

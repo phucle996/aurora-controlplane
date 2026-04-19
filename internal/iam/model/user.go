@@ -6,29 +6,38 @@ import (
 	"controlplane/internal/iam/domain/entity"
 )
 
-// User represents the database schema map for IAM users
+// User represents the database schema map for IAM users.
 type User struct {
-	ID        string    `db:"id"`
-	Email     string    `db:"email"`
-	Password  string    `db:"password"`
-	Role      string    `db:"role"`
-	Status    string    `db:"status"`
-	CreatedAt time.Time `db:"created_at"`
-	UpdatedAt time.Time `db:"updated_at"`
+	ID            string    `db:"id"`
+	Username      string    `db:"username"`
+	Email         string    `db:"email"`
+	Phone         *string   `db:"phone"`
+	PasswordHash  string    `db:"password_hash"`
+	SecurityLevel int16     `db:"security_level"`
+	Status        string    `db:"status"`
+	StatusReason  *string   `db:"status_reason"`
+	Role          *string   `db:"role"`
+	CreatedAt     time.Time `db:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at"`
 }
 
 func UserEntityToModel(u *entity.User) *User {
 	if u == nil {
 		return nil
 	}
+
 	return &User{
-		ID:        u.ID,
-		Email:     u.Email,
-		Password:  u.Password,
-		Role:      u.Role,
-		Status:    u.Status,
-		CreatedAt: u.CreatedAt,
-		UpdatedAt: u.UpdatedAt,
+		ID:            u.ID,
+		Username:      u.Username,
+		Email:         u.Email,
+		Phone:         &u.Phone,
+		PasswordHash:  u.PasswordHash,
+		SecurityLevel: u.SecurityLevel,
+		Status:        u.Status,
+		StatusReason:  &u.StatusReason,
+		Role:          &u.Role,
+		CreatedAt:     u.CreatedAt,
+		UpdatedAt:     u.UpdatedAt,
 	}
 }
 
@@ -36,13 +45,18 @@ func UserModelToEntity(m *User) *entity.User {
 	if m == nil {
 		return nil
 	}
+
 	return &entity.User{
-		ID:        m.ID,
-		Email:     m.Email,
-		Password:  m.Password,
-		Role:      m.Role,
-		Status:    m.Status,
-		CreatedAt: m.CreatedAt,
-		UpdatedAt: m.UpdatedAt,
+		ID:            m.ID,
+		Username:      m.Username,
+		Email:         m.Email,
+		Phone:         *m.Phone,
+		PasswordHash:  m.PasswordHash,
+		SecurityLevel: m.SecurityLevel,
+		Status:        m.Status,
+		StatusReason:  *m.StatusReason,
+		Role:          *m.Role,
+		CreatedAt:     m.CreatedAt,
+		UpdatedAt:     m.UpdatedAt,
 	}
 }

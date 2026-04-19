@@ -1,36 +1,62 @@
--- Seed Roles
-INSERT INTO iam.roles (id, code, name, description, is_system, created_at, updated_at) VALUES 
-('01H00000000000000000000001', 'user', 'User', 'Standard baseline user', true, NOW(), NOW()),
-('01H00000000000000000000002', 'admin', 'Admin', 'System administrator', true, NOW(), NOW())
+INSERT INTO iam.roles (id, name, description, created_at) VALUES
+	(left(md5(random()::text || clock_timestamp()::text || 'user-role'), 26), 'user', 'Standard baseline user', NOW()),
+	(left(md5(random()::text || clock_timestamp()::text || 'root-role'), 26), 'root', 'System root operator', NOW())
+ON CONFLICT (name) DO NOTHING;
+
+INSERT INTO iam.permissions (id, slug, description, created_at) VALUES
+	(left(md5(random()::text || clock_timestamp()::text || 'perm-user-read'), 26), 'iam:user:read', 'Read user profiles', NOW()),
+	(left(md5(random()::text || clock_timestamp()::text || 'perm-user-write'), 26), 'iam:user:write', 'Modify user profiles', NOW()),
+	(left(md5(random()::text || clock_timestamp()::text || 'perm-role-read'), 26), 'iam:role:read', 'Read roles and permissions', NOW()),
+	(left(md5(random()::text || clock_timestamp()::text || 'perm-role-assign'), 26), 'iam:role:assign', 'Assign roles to users', NOW())
+ON CONFLICT (slug) DO NOTHING;
+
+INSERT INTO iam.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM iam.roles r
+JOIN iam.permissions p ON p.slug = 'iam:user:read'
+WHERE r.name = 'user'
 ON CONFLICT DO NOTHING;
 
--- Seed Permissions
-INSERT INTO iam.permissions (id, code, description, created_at, updated_at) VALUES 
-('01H00000000000000000001001', 'iam:user:read', 'Read user profiles', NOW(), NOW()),
-('01H00000000000000000001002', 'iam:user:write', 'Modify user profiles', NOW(), NOW()),
-('01H00000000000000000001003', 'iam:role:read', 'Read roles and hierarchies', NOW(), NOW()),
-('01H00000000000000000001004', 'iam:role:assign', 'Assign roles to users', NOW(), NOW())
+INSERT INTO iam.role_permissions (role_id, permission_id)
+SELECT r.id, p.id
+FROM iam.roles r
+JOIN iam.permissions p ON p.slug IN (
+	'iam:user:read',
+	'iam:user:write',
+	'iam:role:read',
+	'iam:role:assign'
+)
+WHERE r.name = 'root'
 ON CONFLICT DO NOTHING;
 
--- Map basic User permissions
-INSERT INTO iam.role_permissions (role_id, permission_id) VALUES 
-('01H00000000000000000000001', '01H00000000000000000001001')
-ON CONFLICT DO NOTHING;
+INSERT INTO iam.users (
+	id,
+	username,
+	email,
+	phone,
+	password_hash,
+	security_level,
+	status,
+	status_reason,
+	created_at,
+	updated_at
+) VALUES (
+	left(md5(random()::text || clock_timestamp()::text || 'root-user'), 26),
+	'root',
+	'root@controlplane.local',
+	NULL,
+	'argon2id$v=19$m=65536,t=1,p=2$s1903CFSyFSsclrveeVRlQ$8XpGhCVA4M8OlC3fjJTqb51AxhocrOXFv++mS+VJqTk',
+	0,
+	'active',
+	'bootstrap root account',
+	NOW(),
+	NOW()
+)
+ON CONFLICT (username) DO NOTHING;
 
--- Map Admin permissions
-INSERT INTO iam.role_permissions (role_id, permission_id) VALUES 
-('01H00000000000000000000002', '01H00000000000000000001001'),
-('01H00000000000000000000002', '01H00000000000000000001002'),
-('01H00000000000000000000002', '01H00000000000000000001003'),
-('01H00000000000000000000002', '01H00000000000000000001004')
-ON CONFLICT DO NOTHING;
-
--- Seed Root User (Password is 'rootpassword' mapped via Argon2id)
-INSERT INTO iam.users (id, username, email, full_name, password_hash, status, created_at, updated_at) VALUES 
-('01H00000000000000000000000', 'root', 'root@controlplane.local', 'System Root', '$argon2id$v=19$m=65536,t=3,p=4$vQ82Kj2qIfZf5Cq+7N3fXQ$rMjUGEo2eK4JbY/gQf5A019X8k+o2rS6GjXz3v12V0E', 'active', NOW(), NOW())
-ON CONFLICT DO NOTHING;
-
--- Assign Admin role to Root user
-INSERT INTO iam.user_roles (user_id, role_id, created_at) VALUES 
-('01H00000000000000000000000', '01H00000000000000000000002', NOW())
+INSERT INTO iam.user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM iam.users u
+JOIN iam.roles r ON r.name = 'root'
+WHERE u.username = 'root'
 ON CONFLICT DO NOTHING;

@@ -1,12 +1,19 @@
-DROP TABLE IF EXISTS iam.refresh_tokens CASCADE;
-DROP TABLE IF EXISTS iam.sessions CASCADE;
-DROP TABLE IF EXISTS iam.devices CASCADE;
+DROP TABLE IF EXISTS iam.audit_logs CASCADE;
+DROP TABLE IF EXISTS iam.oauth_grants CASCADE;
+DROP TABLE IF EXISTS iam.oauth_clients CASCADE;
 DROP TABLE IF EXISTS iam.user_roles CASCADE;
 DROP TABLE IF EXISTS iam.role_permissions CASCADE;
 DROP TABLE IF EXISTS iam.permissions CASCADE;
 DROP TABLE IF EXISTS iam.roles CASCADE;
-DROP TABLE IF EXISTS iam.mfa_backup_codes CASCADE;
-DROP TABLE IF EXISTS iam.mfa_totp_credentials CASCADE;
+DROP TABLE IF EXISTS iam.recovery_codes CASCADE;
+DROP TABLE IF EXISTS iam.mfa_settings CASCADE;
+DROP TABLE IF EXISTS iam.webauthn_credentials CASCADE;
+DROP TABLE IF EXISTS iam.refresh_tokens CASCADE;
+DROP TABLE IF EXISTS iam.devices CASCADE;
+DROP TABLE IF EXISTS iam.user_profiles CASCADE;
+DROP TABLE IF EXISTS iam.password_histories CASCADE;
 DROP TABLE IF EXISTS iam.users CASCADE;
 
+DROP FUNCTION IF EXISTS iam.trigger_trim_audit_logs();
+DROP FUNCTION IF EXISTS iam.trigger_set_timestamp();
 DROP SCHEMA IF EXISTS iam CASCADE;

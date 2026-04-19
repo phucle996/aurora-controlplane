@@ -4,11 +4,15 @@ import "time"
 
 // User represents the core IAM identity.
 type User struct {
-	ID        string
-	Email     string
-	Password  string
-	Role      string
-	Status    string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID            string
+	Username      string
+	Email         string
+	Phone         string
+	PasswordHash  string
+	SecurityLevel int16
+	Status        string
+	StatusReason  string
+	Role          string
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }

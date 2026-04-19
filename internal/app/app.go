@@ -5,6 +5,7 @@ import (
 	"controlplane/internal/app/bootstrap"
 	"controlplane/internal/config"
 	"controlplane/internal/http/handler"
+	"controlplane/internal/http/middleware"
 	"controlplane/pkg/logger"
 	"fmt"
 	"net/http"
@@ -24,7 +25,7 @@ type App struct {
 }
 
 func NewApplication(cfg *config.Config) (*App, error) {
-	logger.SysInfo("app", "init", "Initializing application...")
+	logger.SysInfo("app", "Initializing application...")
 
 	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -67,11 +68,12 @@ func NewApplication(cfg *config.Config) (*App, error) {
 	// Init Gin engine and register routes
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
-	engine.Use(gin.Recovery())
+	engine.Use(gin.Recovery(), middleware.AccessLog(), middleware.RequestID())
+
 	RegisterRoutes(engine, cfg, rt, health)
 
 	httpSrv := &http.Server{
-		Addr:    fmt.Sprintf(":%s", cfg.App.HTTPPort),
+		Addr:    fmt.Sprintf(":%d", cfg.App.HTTPPort),
 		Handler: engine,
 	}
 
@@ -95,7 +97,7 @@ func NewApplication(cfg *config.Config) (*App, error) {
 }
 
 func (a *App) Start(cfg *config.Config) error {
-	logger.SysInfo("app", "start", "Starting application components...")
+	logger.SysInfo("app", "Starting application components...")
 
 	// Start runtime
 	if err := a.runtime.Start(); err != nil {
@@ -105,37 +107,37 @@ func (a *App) Start(cfg *config.Config) error {
 	// Start gRPC server
 	go func() {
 		if err := a.grpc.Start(); err != nil {
-			logger.SysError("app", "grpc_stopped", fmt.Sprintf("gRPC server stopped: %v", err), "")
+			logger.SysError("app", fmt.Sprintf("gRPC server stopped: %v", err))
 		}
 	}()
 
 	// Start HTTP server
 	go func() {
 		if err := a.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.SysError("app", "http_stopped", fmt.Sprintf("HTTP server stopped: %v", err), "")
+			logger.SysError("app", fmt.Sprintf("HTTP server stopped: %v", err))
 		}
 	}()
 
 	// Mark application as ready to serve traffic
 	a.health.MarkReady()
-	logger.SysInfo("app", "ready", "Application is ready to receive traffic")
+	logger.SysInfo("app", "Application is ready to receive traffic")
 
 	return nil
 }
 
 func (a *App) Stop() {
-	logger.SysInfo("app", "stop", "Stopping application gracefully...")
+	logger.SysInfo("app", "Stopping application gracefully...")
 
 	// 1. Mark as not ready to drain incoming traffic from load balancers
 	a.health.MarkNotReady()
-	logger.SysInfo("app", "draining", "Application marked as not ready (draining traffic)")
+	logger.SysInfo("app", "Application marked as not ready (draining traffic)")
 
 	// Optional: add a small sleep here if deployed behind a cloud load balancer (e.g. AWS ALB)
 	// to allow time for the unregistered target state to propagate.
 
 	// Stop HTTP server
 	if err := a.httpServer.Shutdown(context.Background()); err != nil {
-		logger.SysError("app", "http_shutdown", fmt.Sprintf("HTTP server shutdown error: %v", err), "")
+		logger.SysError("app", fmt.Sprintf("HTTP server shutdown error: %v", err))
 	}
 
 	// Stop gRPC (server + close all client connections)

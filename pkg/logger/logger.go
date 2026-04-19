@@ -82,7 +82,6 @@ func AccessLog(c *gin.Context, op, message, errorCode, method, route string, sta
 	log.WithFields(logrus.Fields{
 		"log_type":    LogTypeAccess,
 		"request_id":  requestID(c),
-		"user_id":     userID(c),
 		"op":          op,
 		"event":       "completed",
 		"message":     message,
@@ -98,94 +97,76 @@ func AccessLog(c *gin.Context, op, message, errorCode, method, route string, sta
 // --- Handler Log ---
 
 // HandlerInfo emits a handler-level info log.
-func HandlerInfo(c *gin.Context, op, event, message string) {
+func HandlerInfo(c *gin.Context, op, message string) {
 	log.WithFields(logrus.Fields{
 		"log_type":   LogTypeHandler,
 		"request_id": requestID(c),
 		"user_id":    userID(c),
 		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": "",
 	}).Info(message)
 }
 
 // HandlerWarn emits a handler-level warn log.
-func HandlerWarn(c *gin.Context, op, event, message, errorCode string) {
-	log.WithFields(logrus.Fields{
+func HandlerWarn(c *gin.Context, op string, err error, message string) {
+	fields := logrus.Fields{
 		"log_type":   LogTypeHandler,
 		"request_id": requestID(c),
 		"user_id":    userID(c),
 		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": errorCode,
-	}).Warn(message)
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
+	log.WithFields(fields).Warn(message)
 }
 
 // HandlerError emits a handler-level error log.
-func HandlerError(c *gin.Context, op, event, message, errorCode string) {
-	log.WithFields(logrus.Fields{
+func HandlerError(c *gin.Context, op string, err error) {
+	fields := logrus.Fields{
 		"log_type":   LogTypeHandler,
 		"request_id": requestID(c),
 		"user_id":    userID(c),
 		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": errorCode,
-	}).Error(message)
+	}
+	if err != nil {
+		fields["error"] = err.Error()
+	}
 }
 
 // --- System Log (startup, shutdown, infra — no gin context) ---
 
 // SysInfo emits a system-level info log.
-func SysInfo(op, event, message string) {
+func SysInfo(op, message string) {
 	log.WithFields(logrus.Fields{
-		"log_type":   LogTypeSystem,
-		"request_id": "",
-		"user_id":    "",
-		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": "",
+		"log_type": LogTypeSystem,
+		"op":       op,
+		"message":  message,
 	}).Info(message)
 }
 
 // SysWarn emits a system-level warn log.
-func SysWarn(op, event, message, errorCode string) {
+func SysWarn(op, message string) {
 	log.WithFields(logrus.Fields{
-		"log_type":   LogTypeSystem,
-		"request_id": "",
-		"user_id":    "",
-		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": errorCode,
+		"log_type": LogTypeSystem,
+		"op":       op,
+		"message":  message,
 	}).Warn(message)
 }
 
 // SysError emits a system-level error log.
-func SysError(op, event, message, errorCode string) {
+func SysError(op, message string) {
 	log.WithFields(logrus.Fields{
-		"log_type":   LogTypeSystem,
-		"request_id": "",
-		"user_id":    "",
-		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": errorCode,
+		"log_type": LogTypeSystem,
+		"op":       op,
+		"message":  message,
 	}).Error(message)
 }
 
 // SysFatal emits a system-level fatal log and exits.
-func SysFatal(op, event, message, errorCode string) {
+func SysFatal(op, message string) {
 	log.WithFields(logrus.Fields{
-		"log_type":   LogTypeSystem,
-		"request_id": "",
-		"user_id":    "",
-		"op":         op,
-		"event":      event,
-		"message":    message,
-		"error_code": errorCode,
+		"log_type": LogTypeSystem,
+		"op":       op,
+		"message":  message,
 	}).Fatal(message)
 }

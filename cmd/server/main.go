@@ -27,13 +27,13 @@ func main() {
 	logger.InitLogger(&cfg.App)
 
 	if err != nil {
-		logger.SysWarn("main", "timezone_load", "Failed to load timezone "+cfg.App.TimeZone+": "+err.Error(), "")
+		logger.SysWarn("main", "Failed to load timezone "+cfg.App.TimeZone+": "+err.Error())
 	}
 
 	// 3. create application
 	application, err := app.NewApplication(cfg)
 	if err != nil {
-		logger.SysFatal("main", "app_init_failed", "Failed to initialize application: "+err.Error(), "")
+		logger.SysFatal("main", "Failed to initialize application: "+err.Error())
 	}
 
 	// 4. prepare for signals
@@ -43,7 +43,7 @@ func main() {
 	// 5. start
 	go func() {
 		if err := application.Start(cfg); err != nil {
-			logger.SysError("main", "app_start_failed", "Application failed to start: "+err.Error(), "")
+			logger.SysError("main", "Application failed to start: "+err.Error())
 			stop <- syscall.SIGTERM
 		}
 	}()
@@ -53,5 +53,5 @@ func main() {
 
 	// 7. trigger graceful shutdown
 	application.Stop()
-	logger.SysInfo("main", "shutdown", "Application stopped gracefully.")
+	logger.SysInfo("main", "Application stopped gracefully.")
 }

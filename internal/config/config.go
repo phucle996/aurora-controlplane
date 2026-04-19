@@ -5,6 +5,7 @@ import "time"
 // Config is the root typed config object, loaded once at startup.
 type Config struct {
 	App        AppCfg
+	Security   SecurityCfg
 	Psql       PsqlCfg
 	Redis      RedisCfg
 	VictoriaDB VictoriaDBCfg
@@ -14,8 +15,20 @@ type Config struct {
 // AppCfg holds application-level settings.
 type AppCfg struct {
 	TimeZone string
-	HTTPPort string
+	HTTPPort int
 	LogLV    string
+}
+
+// SecurityCfg holds authentication and token settings.
+type SecurityCfg struct {
+	AccessSecretKey string
+	AccessSecretTTL time.Duration
+
+	OneTimeTokenTTL    time.Duration
+	OneTimeTokenSecret string
+
+	RefreshTokenSecret string
+	RefreshTokenTTL    time.Duration
 }
 
 // PsqlCfg holds PostgreSQL connection parameters.
@@ -34,10 +47,10 @@ type PsqlCfg struct {
 	KeyPath    string
 
 	// Pool
-	MaxConns     int
-	MinConns     int
-	MaxConnLife  time.Duration
-	MaxConnIdle  time.Duration
+	MaxConns    int
+	MinConns    int
+	MaxConnLife time.Duration
+	MaxConnIdle time.Duration
 
 	// Connection behavior
 	PingTimeout   time.Duration
@@ -107,8 +120,16 @@ func LoadConfig() *Config {
 	return &Config{
 		App: AppCfg{
 			TimeZone: getEnv("APP_TIMEZONE", "UTC"),
-			HTTPPort: getEnv("APP_HTTP_PORT", "8080"),
+			HTTPPort: getEnvAsInt("APP_HTTP_PORT", 8080),
 			LogLV:    getEnv("APP_LOG_LEVEL", "info"),
+		},
+		Security: SecurityCfg{
+			AccessSecretKey:    getEnv("JWT_SECRET_KEY", ""),
+			AccessSecretTTL:    15 * time.Minute,
+			OneTimeTokenTTL:    15 * time.Minute,
+			OneTimeTokenSecret: getEnv("OTT_SECRET", "dev"),
+			RefreshTokenSecret: getEnv("REFRESH_SECRET", "dev"),
+			RefreshTokenTTL:    168 * time.Hour,
 		},
 		Psql: PsqlCfg{
 			Host:          getEnv("PSQL_HOST", "localhost"),

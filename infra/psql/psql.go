@@ -5,6 +5,7 @@ import (
 	"controlplane/internal/config"
 	"controlplane/pkg/logger"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,7 +31,7 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
 		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
-			logger.SysWarn("infra.psql", "connect_failed", fmt.Sprintf("psql: connection attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err), "")
+			logger.SysWarn("infra.psql", fmt.Sprintf("psql: connection attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err))
 			if attempt < cfg.MaxRetries {
 				time.Sleep(cfg.RetryInterval)
 			}
@@ -42,7 +43,7 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 		pingCancel()
 
 		if err != nil {
-			logger.SysWarn("infra.psql", "ping_failed", fmt.Sprintf("psql: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err), "")
+			logger.SysWarn("infra.psql", fmt.Sprintf("psql: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err))
 			pool.Close()
 			if attempt < cfg.MaxRetries {
 				time.Sleep(cfg.RetryInterval)
@@ -50,7 +51,7 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 			continue
 		}
 
-		logger.SysInfo("infra.psql", "connected", fmt.Sprintf("psql: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
+		logger.SysInfo("infra.psql", fmt.Sprintf("psql: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
 		return pool, nil
 	}
 
@@ -60,8 +61,32 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 // buildDSN constructs the connection string from typed config.
 // Never logs the full DSN (contains password).
 func buildDSN(cfg *config.PsqlCfg) string {
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode,
 	)
+
+	if cfg.TLSEnabled {
+		sslMode := strings.TrimSpace(cfg.SSLMode)
+		if sslMode == "" || strings.EqualFold(sslMode, "disable") {
+			sslMode = "verify-full"
+		}
+
+		dsn = fmt.Sprintf(
+			"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+			cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, sslMode,
+		)
+
+		if cfg.CACertPath != "" {
+			dsn += fmt.Sprintf(" sslrootcert=%s", cfg.CACertPath)
+		}
+		if cfg.CertPath != "" {
+			dsn += fmt.Sprintf(" sslcert=%s", cfg.CertPath)
+		}
+		if cfg.KeyPath != "" {
+			dsn += fmt.Sprintf(" sslkey=%s", cfg.KeyPath)
+		}
+	}
+
+	return dsn
 }

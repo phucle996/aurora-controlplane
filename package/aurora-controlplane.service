@@ -1,0 +1,23 @@
+[Unit]
+Description=Aurora Controlplane Service
+After=network.target postgresql.service redis.service
+ConditionPathExists=/usr/local/bin/aurora-controlplane
+
+[Service]
+Type=simple
+User=root
+Group=root
+EnvironmentFile=/etc/aurora-controlplane/.env
+WorkingDirectory=/usr/local/bin
+ExecStart=/usr/local/bin/aurora-controlplane
+Restart=on-failure
+RestartSec=5s
+
+# Security configurations
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

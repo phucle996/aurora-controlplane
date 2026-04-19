@@ -3,10 +3,11 @@ package app
 import (
 	"io/fs"
 	"net/http"
+	"path"
 	"strings"
 
+	httpfs "controlplane/internal/http"
 	"controlplane/pkg/logger"
-	"controlplane/ui"
 
 	"github.com/gin-gonic/gin"
 )
@@ -14,27 +15,39 @@ import (
 // RegisterFrontend mounts the embedded static files from the 'out' directory to the Gin engine.
 // It also sets up a catch-all NoRoute handler to support SPA (Single Page Application) routing.
 func RegisterFrontend(r *gin.Engine) error {
-	distFS, err := fs.Sub(ui.FrontendFS, "out")
+	distFS, err := fs.Sub(httpfs.FrontendFS, "dist")
 	if err != nil {
-		logger.SysError("app.frontend", "embed_failed", "Failed to initialize embedded frontend directory", err.Error())
+		logger.SysError("app.frontend", "Failed to initialize embedded frontend directory: "+err.Error())
+		return err
+	}
+
+	indexHTML, err := fs.ReadFile(distFS, "index.html")
+	if err != nil {
+		logger.SysError("app.frontend", "Failed to read embedded index.html: "+err.Error())
 		return err
 	}
 
 	// Serve frontend static assets cleanly skipping API routes
 	fsHandler := http.FileServer(http.FS(distFS))
+	serveIndex := func(c *gin.Context) {
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+	}
+
+	r.GET("/", func(c *gin.Context) {
+		serveIndex(c)
+	})
+	r.HEAD("/", func(c *gin.Context) {
+		serveIndex(c)
+	})
 
 	r.Use(func(c *gin.Context) {
 		// Ignore API and health check paths
-		if strings.HasPrefix(c.Request.URL.Path, "/api") {
+		if strings.HasPrefix(c.Request.URL.Path, "/api") || c.Request.URL.Path == "/" {
 			c.Next()
 			return
 		}
 
-		// Try providing static file first
-		file, err := distFS.Open(strings.TrimPrefix(c.Request.URL.Path, "/"))
-		if err == nil {
-			file.Close()
-			fsHandler.ServeHTTP(c.Writer, c.Request)
+		if serveExportedAsset(c, distFS, fsHandler) {
 			c.Abort()
 			return
 		}
@@ -53,16 +66,48 @@ func RegisterFrontend(r *gin.Engine) error {
 
 		// For frontend paths, fallback to index.html for client-side routing
 		if c.Request.Method == http.MethodGet {
-			indexFile, err := distFS.Open("index.html")
-			if err == nil {
-				indexFile.Close()
-				c.FileFromFS("index.html", http.FS(distFS))
-				return
-			}
+			serveIndex(c)
+			return
 		}
 
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})
 	})
 
 	return nil
+}
+
+func serveExportedAsset(c *gin.Context, distFS fs.FS, fsHandler http.Handler) bool {
+	if c == nil || c.Request == nil {
+		return false
+	}
+
+	candidates := staticPathCandidates(c.Request.URL.Path)
+	for _, candidate := range candidates {
+		info, err := fs.Stat(distFS, candidate)
+		if err != nil || info.IsDir() {
+			continue
+		}
+
+		req := c.Request.Clone(c.Request.Context())
+		req.URL.Path = "/" + candidate
+		fsHandler.ServeHTTP(c.Writer, req)
+		return true
+	}
+
+	return false
+}
+
+func staticPathCandidates(rawPath string) []string {
+	cleanPath := strings.TrimPrefix(path.Clean("/"+rawPath), "/")
+	if cleanPath == "" || cleanPath == "." {
+		return []string{"index.html"}
+	}
+
+	candidates := []string{cleanPath}
+	if !strings.Contains(path.Base(cleanPath), ".") {
+		candidates = append(candidates, cleanPath+".html")
+		candidates = append(candidates, path.Join(cleanPath, "index.html"))
+	}
+
+	return candidates
 }
