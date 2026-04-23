@@ -1,16 +1,11 @@
 import type { Metadata } from "next";
-import React, { Suspense } from "react";
-import LaneDetailPage from "@/components/smtp/LaneDetailPage";
+import { redirect } from "next/navigation";
 
 export const metadata: Metadata = {
-  title: "Lane Detail | SMTP | Aurora Control Plane",
-  description: "Inspect a delivery lane",
+  title: "Gateway Detail | SMTP | Aurora Control Plane",
+  description: "Inspect a delivery gateway",
 };
 
 export default function SMTPLaneDetailRoutePage() {
-  return (
-    <Suspense fallback={null}>
-      <LaneDetailPage />
-    </Suspense>
-  );
+  redirect("/smtp/gateways/detail");
 }

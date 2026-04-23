@@ -19,6 +19,10 @@ type TokenRepository interface {
 	// Revoke marks a single token as revoked (soft-delete; keeps audit trail).
 	Revoke(ctx context.Context, tokenID string) error
 
+	// ConsumeActive performs compare-and-swap style consume for one active token.
+	// Returns true only when a non-revoked and non-expired token was consumed.
+	ConsumeActive(ctx context.Context, tokenID string) (bool, error)
+
 	// RevokeAllByDevice revokes every token bound to a device.
 	RevokeAllByDevice(ctx context.Context, deviceID string) error
 
@@ -27,4 +31,7 @@ type TokenRepository interface {
 
 	// DeleteExpired hard-deletes tokens past their expiry (admin cleanup).
 	DeleteExpired(ctx context.Context) (int64, error)
+
+	// DeleteExpiredBatch hard-deletes up to "limit" expired rows.
+	DeleteExpiredBatch(ctx context.Context, limit int64) (int64, error)
 }

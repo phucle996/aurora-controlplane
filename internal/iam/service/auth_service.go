@@ -1,4 +1,4 @@
-package service
+package iam_service
 
 import (
 	"context"
@@ -35,8 +35,10 @@ type AuthService struct {
 	deviceSvc iam_domainsvc.DeviceService
 	tokenSvc  iam_domainsvc.TokenService
 	mfaSvc    iam_domainsvc.MfaService
+	adminSvc  iam_domainsvc.AdminAPITokenService
 	rdb       *redis.Client
 	cfg       *config.Config
+	secrets   security.SecretProvider
 }
 
 func NewAuthService(
@@ -44,16 +46,20 @@ func NewAuthService(
 	deviceSvc iam_domainsvc.DeviceService,
 	tokenSvc iam_domainsvc.TokenService,
 	mfaSvc iam_domainsvc.MfaService,
+	adminSvc iam_domainsvc.AdminAPITokenService,
 	rdb *redis.Client,
 	cfg *config.Config,
+	secrets security.SecretProvider,
 ) *AuthService {
 	return &AuthService{
 		repo:      repo,
 		deviceSvc: deviceSvc,
 		tokenSvc:  tokenSvc,
 		mfaSvc:    mfaSvc,
+		adminSvc:  adminSvc,
 		rdb:       rdb,
 		cfg:       cfg,
+		secrets:   secrets,
 	}
 }
 
@@ -143,7 +149,16 @@ func (s *AuthService) Register(ctx context.Context, user *entity.User, profile *
 	return s.enqueueActivationEmail(ctx, user.ID, user.Email, profile.Fullname, now)
 }
 
-func (s *AuthService) Login(ctx context.Context, username, password string) (*entity.LoginResult, error) {
+func (s *AuthService) Login(ctx context.Context, username, password, deviceFingerprint, devicePublicKey, deviceKeyAlgorithm string) (*entity.LoginResult, error) {
+	deviceFingerprint = strings.TrimSpace(deviceFingerprint)
+	devicePublicKey = strings.TrimSpace(devicePublicKey)
+	deviceKeyAlgorithm = strings.TrimSpace(deviceKeyAlgorithm)
+	if deviceFingerprint == "" || devicePublicKey == "" {
+		return nil, iam_errorx.ErrDeviceBindingRequired
+	}
+	if deviceKeyAlgorithm == "" {
+		deviceKeyAlgorithm = "ES256"
+	}
 
 	// 1. Resolve the account by login identifier.
 	user, err := s.repo.GetByUsername(ctx, username)
@@ -185,7 +200,7 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*en
 	}
 
 	// 5. Resolve or create the logical device for this session.
-	resolvedDevice, err := s.resolveLoginDevice(ctx, user)
+	resolvedDevice, err := s.resolveLoginDevice(ctx, user, deviceFingerprint, devicePublicKey, deviceKeyAlgorithm)
 	if err != nil {
 		return nil, err
 	}
@@ -221,25 +236,58 @@ func (s *AuthService) Login(ctx context.Context, username, password string) (*en
 	}, nil
 }
 
-func (s *AuthService) enqueueActivationEmail(ctx context.Context, userID, email, fullName string, now time.Time) error {
-	if s == nil || s.cfg == nil {
-		return iam_errorx.ErrActivationFailed
+func (s *AuthService) AdminAPIKeyLogin(ctx context.Context, apiKey string) error {
+	apiKey = strings.TrimSpace(apiKey)
+	if apiKey == "" {
+		return iam_errorx.ErrAdminAPIKeyInvalid
 	}
-	if s.rdb == nil {
-		return iam_errorx.ErrActivationFailed
+	if s == nil || s.adminSvc == nil {
+		return iam_errorx.ErrAdminAPIKeyAuthError
 	}
 
-	token, err := security.GenerateToken(48, s.cfg.Security.OneTimeTokenSecret)
+	valid, err := s.adminSvc.Validate(ctx, apiKey)
+	if err != nil {
+		return fmt.Errorf("%w: %v", iam_errorx.ErrAdminAPIKeyAuthError, err)
+	}
+	if !valid {
+		return iam_errorx.ErrAdminAPIKeyInvalid
+	}
+
+	return nil
+}
+
+func (s *AuthService) WhoAmI(ctx context.Context, userID string) (*entity.WhoAmI, error) {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return nil, iam_errorx.ErrUserNotFound
+	}
+
+	result, err := s.repo.GetWhoAmI(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return nil, iam_errorx.ErrUserNotFound
+	}
+
+	return result, nil
+}
+
+func (s *AuthService) enqueueActivationEmail(ctx context.Context, userID, email, fullName string, now time.Time) error {
+	activeSecret, err := s.secrets.GetActive(security.SecretFamilyOneTime)
+	if err != nil {
+		return iam_errorx.ErrTokenGeneration
+	}
+
+	token, err := security.GenerateToken(48, activeSecret.Value)
 	if err != nil {
 		return fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
-	verificationLink := fmt.Sprintf("http://localhost/api/v1/auth/activate?token=%s", url.QueryEscape(token))
+	verificationLink := buildAbsoluteLink(s.cfg.App.PublicURL, "/api/v1/auth/activate", url.Values{
+		"token": []string{token},
+	})
 	key := registerTokenPrefix + tokenDigest(token)
-	ttl := s.cfg.Security.OneTimeTokenTTL
-	if ttl <= 0 {
-		ttl = 15 * time.Minute
-	}
 
 	values := map[string]any{
 		"user_id":           userID,
@@ -248,12 +296,12 @@ func (s *AuthService) enqueueActivationEmail(ctx context.Context, userID, email,
 		"purpose":           "verify_email",
 		"verification_link": verificationLink,
 		"created_at":        now.Format(time.RFC3339Nano),
-		"expires_at":        now.Add(ttl).Format(time.RFC3339Nano),
+		"expires_at":        now.Add(s.cfg.Security.OneTimeTokenTTL).Format(time.RFC3339Nano),
 	}
 
 	pipe := s.rdb.TxPipeline()
 	pipe.HSet(ctx, key, values)
-	pipe.Expire(ctx, key, ttl)
+	pipe.Expire(ctx, key, s.cfg.Security.OneTimeTokenTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
 	}
@@ -286,14 +334,18 @@ func (s *AuthService) enqueueActivationEmail(ctx context.Context, userID, email,
 	return nil
 }
 
-func (s *AuthService) resolveLoginDevice(ctx context.Context, user *entity.User) (*entity.Device, error) {
-	fingerprint := deriveLoginDeviceFingerprint(user.ID, user.Username)
-	return s.deviceSvc.ResolveDevice(ctx, user.ID, fingerprint, "ES256")
-}
+func (s *AuthService) resolveLoginDevice(ctx context.Context, user *entity.User, fingerprint, publicKey, keyAlgorithm string) (*entity.Device, error) {
+	fingerprint = strings.TrimSpace(fingerprint)
+	publicKey = strings.TrimSpace(publicKey)
+	keyAlgorithm = strings.TrimSpace(keyAlgorithm)
+	if fingerprint == "" || publicKey == "" {
+		return nil, iam_errorx.ErrDeviceBindingRequired
+	}
+	if keyAlgorithm == "" {
+		keyAlgorithm = "ES256"
+	}
 
-func deriveLoginDeviceFingerprint(userID, username string) string {
-	sum := sha256.Sum256([]byte(strings.TrimSpace(userID) + "|" + strings.TrimSpace(username) + "|login"))
-	return hex.EncodeToString(sum[:])
+	return s.deviceSvc.ResolveDevice(ctx, user.ID, fingerprint, publicKey, keyAlgorithm)
 }
 
 func (s *AuthService) Activate(ctx context.Context, token string) error {
@@ -333,6 +385,26 @@ func tokenDigest(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func buildAbsoluteLink(baseURL, path string, query url.Values) string {
+	base := strings.TrimSpace(baseURL)
+	if base == "" {
+		base = "http://localhost:8080"
+	}
+	if !strings.Contains(base, "://") {
+		base = "http://" + base
+	}
+
+	base = strings.TrimRight(base, "/")
+	path = "/" + strings.TrimLeft(path, "/")
+
+	link := base + path
+	if len(query) == 0 {
+		return link
+	}
+
+	return link + "?" + query.Encode()
+}
+
 // ─── Password Reset ───────────────────────────────────────────────────────────
 
 const (
@@ -347,7 +419,7 @@ const (
 // always receive a success response to prevent user enumeration.
 // The actual reset link is delivered via the mail job stream.
 func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
-	if s == nil || s.cfg == nil || s.rdb == nil {
+	if s == nil || s.cfg == nil || s.rdb == nil || s.secrets == nil {
 		return iam_errorx.ErrResetFailed
 	}
 
@@ -372,14 +444,20 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 	now := time.Now().UTC()
 
 	// 3. Generate a single-use opaque token.
-	rawToken, err := security.GenerateToken(48, s.cfg.Security.OneTimeTokenSecret)
+	activeSecret, err := s.secrets.GetActive(security.SecretFamilyOneTime)
+	if err != nil {
+		return iam_errorx.ErrTokenGeneration
+	}
+
+	rawToken, err := security.GenerateToken(48, activeSecret.Value)
 	if err != nil {
 		return fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
-	// 4. Build the reset link.
-	baseURL := strings.TrimRight("localhost", "/")
-	resetLink := fmt.Sprintf("%s/reset-password?token=%s", baseURL, url.QueryEscape(rawToken))
+	// 4. Build the reset link from the configured public base URL.
+	resetLink := buildAbsoluteLink(s.cfg.App.PublicURL, "/reset-password", url.Values{
+		"token": []string{rawToken},
+	})
 
 	// 5. Persist the token metadata in Redis with TTL.
 	ttl := s.cfg.Security.OneTimeTokenTTL
@@ -434,7 +512,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 
 // ResetPassword validates the one-time reset token and replaces the user's password.
 func (s *AuthService) ResetPassword(ctx context.Context, rawToken, newPassword string) error {
-	if s == nil || s.cfg == nil || s.rdb == nil || s.repo == nil {
+	if s == nil || s.cfg == nil || s.rdb == nil || s.repo == nil || s.tokenSvc == nil {
 		return iam_errorx.ErrResetFailed
 	}
 
@@ -482,7 +560,13 @@ func (s *AuthService) ResetPassword(ctx context.Context, rawToken, newPassword s
 		return fmt.Errorf("%w: %v", iam_errorx.ErrResetFailed, err)
 	}
 
-	// 5. Consume the token — single-use.
+	// 5. Revoke all refresh tokens for this user so old sessions cannot
+	//    survive a successful password reset.
+	if err := s.tokenSvc.RevokeAllByUser(ctx, userID); err != nil {
+		return fmt.Errorf("%w: revoke sessions: %v", iam_errorx.ErrResetFailed, err)
+	}
+
+	// 6. Consume the token — single-use.
 	_ = s.rdb.Del(ctx, key).Err()
 
 	return nil
@@ -497,7 +581,7 @@ func (s *AuthService) Logout(ctx context.Context, jti string, rawRefreshToken st
 	}
 
 	// 2. Revoke the refresh token
-	if rawRefreshToken != "" {
+	if rawRefreshToken != "" && s.tokenSvc != nil {
 		_ = s.tokenSvc.RevokeByRaw(ctx, rawRefreshToken) // best effort
 	}
 

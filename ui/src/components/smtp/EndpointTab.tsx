@@ -3,45 +3,16 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useDropzone } from "react-dropzone";
 import ComponentCard from "@/components/common/ComponentCard";
+import {
+  createEndpoint,
+  deleteEndpoint,
+  getEndpoint,
+  listEndpoints,
+  tryConnectEndpoint,
+  updateEndpoint,
+} from "@/components/smtp/api";
+import { useSMTPWorkspace } from "@/components/smtp/SMTPWorkspaceProvider";
 import type { DeliveryEndpoint } from "@/components/smtp/types";
-
-type ListEndpointsResponse = {
-  items?: Array<{
-    id: string;
-    name: string;
-    provider_kind?: string;
-    host: string;
-    port: number;
-    username: string;
-    priority: number;
-    weight: number;
-    status: string;
-    tls_mode: string;
-    has_ca_cert?: boolean;
-    has_client_cert?: boolean;
-    has_client_key?: boolean;
-    created_at?: string;
-    updated_at?: string;
-  }>;
-};
-
-type EndpointDetailResponse = {
-  id: string;
-  name: string;
-  provider_kind?: string;
-  host: string;
-  port: number;
-  username: string;
-  priority: number;
-  weight: number;
-  status: string;
-  tls_mode: string;
-  has_ca_cert?: boolean;
-  has_client_cert?: boolean;
-  has_client_key?: boolean;
-  created_at?: string;
-  updated_at?: string;
-};
 
 type TLSMode = "none" | "starttls" | "tls" | "mtls";
 type EndpointStatus = DeliveryEndpoint["status"];
@@ -88,6 +59,7 @@ export function EndpointTab({
   selectedEndpointId: string;
   onSelectEndpoint: (value: string) => void;
 }) {
+  const { workspace, workspaceID, isLoading: isWorkspaceLoading, error: workspaceError } = useSMTPWorkspace();
   const [endpoints, setEndpoints] = useState<DeliveryEndpoint[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
@@ -106,23 +78,19 @@ export function EndpointTab({
 
   const loadEndpoints = useCallback(
     async (preferredEndpointID?: string) => {
+      if (workspaceID === "") {
+        setEndpoints([]);
+        onSelectEndpoint("");
+        setIsLoading(false);
+        setError("");
+        return;
+      }
+
       setIsLoading(true);
       setError("");
 
       try {
-        const response = await fetch("/api/v1/smtp/endpoints", {
-          method: "GET",
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          throw new Error("Failed to load SMTP endpoints");
-        }
-
-        const result = (await response.json()) as ListEndpointsResponse;
-        const nextItems: DeliveryEndpoint[] = (result.items ?? []).map((item) =>
-          mapEndpointResponse(item),
-        );
+        const nextItems = await listEndpoints(workspaceID);
 
         setEndpoints(nextItems);
 
@@ -145,7 +113,7 @@ export function EndpointTab({
         setIsLoading(false);
       }
     },
-    [onSelectEndpoint, selectedEndpointId],
+    [onSelectEndpoint, selectedEndpointId, workspaceID],
   );
 
   useEffect(() => {
@@ -166,21 +134,12 @@ export function EndpointTab({
       setDetailError("");
 
       try {
-        const response = await fetch(`/api/v1/smtp/endpoints/${selectedEndpointId}`, {
-          method: "GET",
-          cache: "no-store",
-        });
-
-        if (!response.ok) {
-          throw new Error("Failed to load SMTP endpoint detail");
-        }
-
-        const item = (await response.json()) as EndpointDetailResponse;
+        const item = await getEndpoint(workspaceID, selectedEndpointId);
         if (cancelled) {
           return;
         }
 
-        setDetail(mapEndpointResponse(item));
+        setDetail(item);
       } catch (err) {
         if (!cancelled) {
           setDetailError(
@@ -198,7 +157,7 @@ export function EndpointTab({
     return () => {
       cancelled = true;
     };
-  }, [selectedEndpointId, mode]);
+  }, [selectedEndpointId, mode, workspaceID]);
 
   useEffect(() => {
     if (mode === "create") {
@@ -267,7 +226,7 @@ export function EndpointTab({
   }
 
   async function handleSave() {
-    const nextErrors = validateEndpointForm(form, { requireName: true });
+    const nextErrors = validateEndpointForm(form, { requireName: true, existingDetail: detail });
     if (Object.keys(nextErrors).length > 0) {
       setFieldErrors(nextErrors);
       setActionError("Please complete the required endpoint fields.");
@@ -281,25 +240,16 @@ export function EndpointTab({
     setFieldErrors({});
 
     try {
-      const formData = buildEndpointFormData(form);
-
-      const target =
-        mode === "create"
-          ? "/api/v1/smtp/endpoints"
-          : `/api/v1/smtp/endpoints/${selectedEndpointId}`;
-
-      const method = mode === "create" ? "POST" : "PUT";
-      const response = await fetch(target, {
-        method,
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const result = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(result?.error || "Failed to save SMTP endpoint");
+      if (workspaceID === "") {
+        throw new Error("Choose a workspace first.");
       }
+      const payload = await buildEndpointPayload(form);
 
-      const result = (await response.json()) as EndpointDetailResponse;
+      const result =
+        mode === "create"
+          ? await createEndpoint(workspaceID, payload)
+          : await updateEndpoint(workspaceID, selectedEndpointId, payload);
+
       await loadEndpoints(result.id);
       onView();
     } catch (err) {
@@ -310,7 +260,7 @@ export function EndpointTab({
   }
 
   async function handleTryConnect() {
-    const nextErrors = validateEndpointForm(form, { requireName: false });
+    const nextErrors = validateEndpointForm(form, { requireName: false, existingDetail: detail });
     if (Object.keys(nextErrors).length > 0) {
       setFieldErrors(nextErrors);
       setConnectResult({
@@ -326,22 +276,15 @@ export function EndpointTab({
     setFieldErrors({});
 
     try {
-      const response = await fetch("/api/v1/smtp/endpoints/try-connect", {
-        method: "POST",
-        body: buildEndpointFormData(form),
-      });
-
-      const result = (await response.json().catch(() => null)) as
-        | { message?: string; error?: string }
-        | null;
-
-      if (!response.ok) {
-        throw new Error(result?.message || result?.error || "Failed to connect to SMTP endpoint");
+      if (workspaceID === "") {
+        throw new Error("Choose a workspace first.");
       }
+      const payload = await buildEndpointPayload(form);
+      const message = await tryConnectEndpoint(workspaceID, payload);
 
       setConnectResult({
         tone: "success",
-        message: result?.message || "SMTP connection succeeded",
+        message,
       });
     } catch (err) {
       setConnectResult({
@@ -360,36 +303,14 @@ export function EndpointTab({
 
     setActionError("");
     try {
-      const response = await fetch(`/api/v1/smtp/endpoints/${endpointID}`, {
-        method: "DELETE",
-      });
-      if (!response.ok) {
-        const result = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(result?.error || "Failed to delete SMTP endpoint");
+      if (workspaceID === "") {
+        throw new Error("Choose a workspace first.");
       }
-
+      await deleteEndpoint(workspaceID, endpointID);
       await loadEndpoints();
       onView();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : "Failed to delete SMTP endpoint");
-    }
-  }
-
-  async function handleToggleStatus(endpoint: DeliveryEndpoint) {
-    setActionError("");
-    try {
-      const action = endpoint.status === "active" ? "stop" : "start";
-      const response = await fetch(`/api/v1/smtp/endpoints/${endpoint.id}/${action}`, {
-        method: "POST",
-      });
-      if (!response.ok) {
-        const result = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(result?.error || `Failed to ${action} SMTP endpoint`);
-      }
-
-      await loadEndpoints(endpoint.id);
-    } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to update SMTP endpoint status");
     }
   }
 
@@ -432,6 +353,30 @@ export function EndpointTab({
             )}
 
             <div className="space-y-3">
+              {isWorkspaceLoading && (
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400">
+                  Loading workspace context...
+                </div>
+              )}
+
+              {!isWorkspaceLoading && workspaceError !== "" && (
+                <div className="rounded-2xl border border-error-200 bg-error-50 px-4 py-5 text-sm text-error-700 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-300">
+                  {workspaceError}
+                </div>
+              )}
+
+              {!isWorkspaceLoading && workspaceError === "" && workspaceID === "" && (
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400">
+                  Choose a workspace to manage SMTP endpoints.
+                </div>
+              )}
+
+              {!isWorkspaceLoading && workspace != null && (
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-600 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-300">
+                  Managing endpoints for <span className="font-semibold text-gray-900 dark:text-white">{workspace.name}</span>.
+                </div>
+              )}
+
               {isLoading && (
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-5 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400">
                   Loading SMTP endpoints...
@@ -491,16 +436,6 @@ export function EndpointTab({
                           className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 shadow-theme-xs dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
                         >
                           Delete
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            void handleToggleStatus(endpoint);
-                          }}
-                          className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs font-medium text-gray-700 shadow-theme-xs dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200"
-                        >
-                          {endpoint.status === "active" ? "Stop" : "Start"}
                         </button>
                       </div>
                     </div>
@@ -572,8 +507,8 @@ export function EndpointTab({
                       <div className="grid gap-3 md:grid-cols-3">
                         {[
                           { key: "active", label: "Active" },
-                          { key: "standby", label: "Standby" },
-                          { key: "maintenance", label: "Maintenance" },
+                          { key: "draining", label: "Draining" },
+                          { key: "disabled", label: "Disabled" },
                         ].map((statusOption) => (
                           <ChoiceCard
                             key={statusOption.key}
@@ -680,9 +615,10 @@ export function EndpointTab({
 
                             {mode === "edit" && (
                               <p className="text-xs text-gray-500 dark:text-gray-400">
-                                Leave TLS fields empty to keep the current material. Switching to
-                                No TLS clears saved certificates. Switching to mTLS requires both a
-                                client certificate and private key.
+                                Leaving secret or certificate fields empty keeps the current stored
+                                material. Switching to No TLS clears saved certificates. Switching
+                                to mTLS requires both a client certificate and private key unless
+                                the endpoint already has them stored.
                               </p>
                             )}
                           </div>
@@ -999,7 +935,7 @@ function endpointFieldErrorKey(field: keyof EndpointFormState): EndpointFieldErr
 
 function validateEndpointForm(
   form: EndpointFormState,
-  options: { requireName: boolean },
+  options: { requireName: boolean; existingDetail?: DeliveryEndpoint | null },
 ): EndpointFieldErrors {
   const errors: EndpointFieldErrors = {};
 
@@ -1027,10 +963,10 @@ function validateEndpointForm(
         ? form.clientKeyContent.trim() !== ""
         : form.clientKeyFile != null;
 
-    if (!hasClientCert) {
+    if (!hasClientCert && !options.existingDetail?.hasClientCert) {
       errors.clientCert = "Client certificate is required for mTLS.";
     }
-    if (!hasClientKey) {
+    if (!hasClientKey && !options.existingDetail?.hasClientKey) {
       errors.clientKey = "Client private key is required for mTLS.";
     }
   }
@@ -1046,7 +982,7 @@ function StatusDot({
   const tone =
     status === "active"
       ? "bg-success-500"
-      : status === "maintenance"
+      : status === "draining"
         ? "bg-warning-500"
         : "bg-error-500";
 
@@ -1074,35 +1010,40 @@ function emptyEndpointForm(): EndpointFormState {
   };
 }
 
-function buildEndpointFormData(form: EndpointFormState): FormData {
-  const formData = new FormData();
-  formData.set("name", form.name);
-  formData.set("host", form.host);
-  formData.set("port", form.port);
-  formData.set("username", form.username);
-  formData.set("password", form.password);
-  formData.set("priority", form.priority);
-  formData.set("weight", form.weight);
-  formData.set("status", mapUIStatusToAPI(form.status));
-  formData.set("tls_mode", form.tlsMode);
+async function buildEndpointPayload(form: EndpointFormState): Promise<Record<string, unknown>> {
+  const caCertPEM =
+    form.certInputMode === "manual"
+      ? form.caCertContent.trim()
+      : await readOptionalFile(form.caCertFile);
+  const clientCertPEM =
+    form.certInputMode === "manual"
+      ? form.clientCertContent.trim()
+      : await readOptionalFile(form.clientCertFile);
+  const clientKeyPEM =
+    form.certInputMode === "manual"
+      ? form.clientKeyContent.trim()
+      : await readOptionalFile(form.clientKeyFile);
 
-  if (form.certInputMode === "manual") {
-    formData.set("ca_cert_content", form.caCertContent);
-    formData.set("client_cert_content", form.clientCertContent);
-    formData.set("client_key_content", form.clientKeyContent);
-  } else {
-    if (form.caCertFile != null) {
-      formData.append("ca_cert_file", form.caCertFile);
-    }
-    if (form.clientCertFile != null) {
-      formData.append("client_cert_file", form.clientCertFile);
-    }
-    if (form.clientKeyFile != null) {
-      formData.append("client_key_file", form.clientKeyFile);
-    }
-  }
-
-  return formData;
+  return {
+    name: form.name.trim(),
+    provider_kind: "smtp",
+    host: form.host.trim(),
+    port: parseInteger(form.port, 587),
+    username: form.username.trim(),
+    password: form.password,
+    priority: parseInteger(form.priority, 100),
+    weight: parseInteger(form.weight, 1),
+    max_connections: 10,
+    max_parallel_sends: 20,
+    max_messages_per_second: 0,
+    burst: 0,
+    warmup_state: "stable",
+    status: form.status,
+    tls_mode: form.tlsMode,
+    ca_cert_pem: form.tlsMode === "none" || form.tlsMode === "starttls" ? "" : caCertPEM,
+    client_cert_pem: form.tlsMode === "mtls" ? clientCertPEM : "",
+    client_key_pem: form.tlsMode === "mtls" ? clientKeyPEM : "",
+  };
 }
 
 function endpointToForm(endpoint: DeliveryEndpoint): EndpointFormState {
@@ -1126,61 +1067,17 @@ function endpointToForm(endpoint: DeliveryEndpoint): EndpointFormState {
   };
 }
 
-function mapEndpointResponse(
-  item: NonNullable<ListEndpointsResponse["items"]>[number] | EndpointDetailResponse,
-): DeliveryEndpoint {
-  return {
-    id: item.id,
-    name: item.name,
-    providerKind: item.provider_kind ?? "smtp",
-    host: item.host,
-    port: item.port,
-    username: item.username,
-    priority: item.priority,
-    weight: item.weight,
-    status: mapEndpointStatus(item.status),
-    tlsMode: mapTLSMode(item.tls_mode),
-    hasCACert: item.has_ca_cert,
-    hasClientCert: item.has_client_cert,
-    hasClientKey: item.has_client_key,
-    createdAt: item.created_at,
-    updatedAt: item.updated_at,
-  };
+async function readOptionalFile(file: File | null): Promise<string> {
+  if (file == null) {
+    return "";
+  }
+  return file.text();
 }
 
-function mapEndpointStatus(status: string): EndpointStatus {
-  switch (status) {
-    case "active":
-      return "active";
-    case "draining":
-      return "maintenance";
-    case "disabled":
-      return "standby";
-    default:
-      return "standby";
+function parseInteger(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isFinite(parsed)) {
+    return parsed;
   }
-}
-
-function mapUIStatusToAPI(status: EndpointStatus): string {
-  switch (status) {
-    case "active":
-      return "active";
-    case "maintenance":
-      return "draining";
-    default:
-      return "disabled";
-  }
-}
-
-function mapTLSMode(mode: string): TLSMode {
-  switch (mode) {
-    case "starttls":
-      return "starttls";
-    case "tls":
-      return "tls";
-    case "mtls":
-      return "mtls";
-    default:
-      return "none";
-  }
+  return fallback;
 }

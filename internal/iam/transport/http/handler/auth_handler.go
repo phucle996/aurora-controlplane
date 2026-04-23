@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -15,6 +16,7 @@ import (
 	iam_domainsvc "controlplane/internal/iam/domain/service"
 	iam_errorx "controlplane/internal/iam/errorx"
 	iam_reqdto "controlplane/internal/iam/transport/http/request"
+	iam_resdto "controlplane/internal/iam/transport/http/response"
 	"controlplane/pkg/logger"
 
 	"github.com/gin-gonic/gin"
@@ -22,6 +24,13 @@ import (
 
 var (
 	registerUsernamePattern = regexp.MustCompile(`^[a-z0-9._-]+$`)
+	whoamiRolesPool         sync.Pool
+	whoamiPermsPool         sync.Pool
+)
+
+const (
+	iamPooledSliceDefaultCap = 8
+	iamPooledSliceMaxCap     = 256
 )
 
 type AuthHandler struct {
@@ -32,6 +41,15 @@ func NewAuthHandler(authSvc iam_domainsvc.AuthService) *AuthHandler {
 	return &AuthHandler{authSvc: authSvc}
 }
 
+// @Router /api/v1/auth/register [post]
+// @Tags Auth
+// @Summary Register
+// @Description Register
+// @Accept json
+// @Produce json
+// @Success 201 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *AuthHandler) Register(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -89,7 +107,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Email:         email,
 		Phone:         phone,
 		PasswordHash:  "",
-		SecurityLevel: 0,
+		SecurityLevel: 4,
 		Status:        "pending",
 		StatusReason:  "pending_email_verification",
 		Role:          "",
@@ -116,6 +134,15 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	response.RespondCreated(c, nil, "Account registered successfully. Please verify your email.")
 }
 
+// @Router /api/v1/auth/activate [post]
+// @Tags Auth
+// @Summary Activate
+// @Description Activate
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *AuthHandler) Activate(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -146,6 +173,15 @@ func (h *AuthHandler) Activate(c *gin.Context) {
 	response.RespondSuccess(c, nil, "account activated successfully")
 }
 
+// @Router /api/v1/auth/login [post]
+// @Tags Auth
+// @Summary Login
+// @Description Login
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *AuthHandler) Login(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -159,8 +195,20 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 	username := strings.ToLower(strings.TrimSpace(req.Username))
 	password := strings.TrimSpace(req.Password)
+	deviceFingerprint := strings.TrimSpace(req.DeviceFingerprint)
+	devicePublicKey := strings.TrimSpace(req.DevicePublicKey)
+	deviceKeyAlgorithm := strings.TrimSpace(req.DeviceKeyAlgorithm)
 
-	result, err := h.authSvc.Login(ctx, username, password)
+	if deviceFingerprint == "" || devicePublicKey == "" {
+		logger.HandlerWarn(c, "iam.auth", nil, "device binding fields are required")
+		response.RespondBadRequest(c, "invalid request payload")
+		return
+	}
+	if deviceKeyAlgorithm == "" {
+		deviceKeyAlgorithm = "ES256"
+	}
+
+	result, err := h.authSvc.Login(ctx, username, password, deviceFingerprint, devicePublicKey, deviceKeyAlgorithm)
 	if err != nil {
 		logger.HandlerError(c, "iam.auth", err)
 
@@ -171,6 +219,11 @@ func (h *AuthHandler) Login(c *gin.Context) {
 
 		if errors.Is(err, iam_errorx.ErrInvalidCredentials) || errors.Is(err, iam_errorx.ErrUserNotFound) {
 			response.RespondUnauthorized(c, "invalid username or password")
+			return
+		}
+
+		if errors.Is(err, iam_errorx.ErrDeviceBindingRequired) || errors.Is(err, iam_errorx.ErrDeviceKeyInvalid) {
+			response.RespondBadRequest(c, "invalid request payload")
 			return
 		}
 
@@ -201,42 +254,66 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 
-	secureCookie := c.Request != nil && (c.Request.TLS != nil || strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Forwarded-Proto")), "https"))
-	accessMaxAge := int(time.Until(result.AccessTokenExpiresAt).Seconds())
-	refreshMaxAge := int(time.Until(result.RefreshTokenExpiresAt).Seconds())
-
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "access_token",
-		Value:    result.AccessToken,
-		Path:     "/",
-		MaxAge:   accessMaxAge,
-		Expires:  result.AccessTokenExpiresAt,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    result.RefreshToken,
-		Path:     "/",
-		MaxAge:   refreshMaxAge,
-		Expires:  result.RefreshTokenExpiresAt,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
+	setSessionCookies(c, result.AccessToken, result.RefreshToken, result.DeviceID, result.AccessTokenExpiresAt, result.RefreshTokenExpiresAt)
 
 	logger.HandlerInfo(c, "iam.auth", "User logged in successfully")
-	response.RespondSuccess(c, gin.H{
-		"access_token":             result.AccessToken,
-		"refresh_token":            result.RefreshToken,
-		"device_id":                result.DeviceID,
-		"access_token_expires_at":  result.AccessTokenExpiresAt.Unix(),
-		"refresh_token_expires_at": result.RefreshTokenExpiresAt.Unix(),
-	}, "login successful")
+	c.AbortWithStatus(http.StatusNoContent)
 }
 
-// ForgotPassword POST /api/v1/auth/forgot-password
+// @Router /admin/auth/login [post]
+// @Tags Auth
+// @Summary Admin login with API key
+// @Description Admin login with API key
+// @Accept json
+// @Produce json
+// @Success 204 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 401 {object} response.Response
+// @Failure 500 {object} response.Response
+func (h *AuthHandler) AdminLogin(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	var req iam_reqdto.AdminAPIKeyLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		logger.HandlerWarn(c, "iam.auth.admin-login", err, "invalid payload")
+		response.RespondBadRequest(c, "invalid request payload")
+		return
+	}
+
+	apiKey := strings.TrimSpace(req.APIKey)
+	if apiKey == "" {
+		response.RespondBadRequest(c, "invalid request payload")
+		return
+	}
+
+	if err := h.authSvc.AdminAPIKeyLogin(ctx, apiKey); err != nil {
+		logger.HandlerError(c, "iam.auth.admin-login", err)
+		switch {
+		case errors.Is(err, iam_errorx.ErrAdminAPIKeyInvalid):
+			response.RespondUnauthorized(c, "unauthorized")
+		case errors.Is(err, iam_errorx.ErrAdminAPIKeyAuthError):
+			response.RespondServiceUnavailable(c, "admin authentication unavailable")
+		default:
+			response.RespondInternalError(c, "admin authentication failed")
+		}
+		return
+	}
+
+	setAdminAPITokenCookie(c, apiKey)
+	logger.HandlerInfo(c, "iam.auth.admin-login", "admin api token login successful")
+	c.AbortWithStatus(http.StatusNoContent)
+}
+
+// @Router /api/v1/auth/forgot-password [post]
+// @Tags Auth
+// @Summary Forgot password
+// @Description Forgot password
+// @Accept json
+// @Produce json
+// @Success 202 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
@@ -258,7 +335,15 @@ func (h *AuthHandler) ForgotPassword(c *gin.Context) {
 	response.RespondAccepted(c, nil, "if the email is registered, a reset link has been sent")
 }
 
-// ResetPassword POST /api/v1/auth/reset-password
+// @Router /api/v1/auth/reset-password [post]
+// @Tags Auth
+// @Summary Reset password
+// @Description Reset password
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
@@ -284,7 +369,16 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 
 	if err := h.authSvc.ResetPassword(ctx, token, req.NewPassword); err != nil {
 		logger.HandlerError(c, "iam.auth.reset-password", err)
-		h.mapResetError(c, err)
+		switch {
+		case errors.Is(err, iam_errorx.ErrResetTokenInvalid):
+			response.RespondBadRequest(c, "reset token is invalid")
+		case errors.Is(err, iam_errorx.ErrResetTokenExpired):
+			response.RespondBadRequest(c, "reset token has expired")
+		case errors.Is(err, iam_errorx.ErrWeakPassword):
+			response.RespondBadRequest(c, "password does not meet requirements")
+		default:
+			response.RespondInternalError(c, "password reset failed")
+		}
 		return
 	}
 
@@ -292,23 +386,15 @@ func (h *AuthHandler) ResetPassword(c *gin.Context) {
 	response.RespondSuccess(c, nil, "password reset successful")
 }
 
-func (h *AuthHandler) mapResetError(c *gin.Context, err error) {
-	switch {
-	case errors.Is(err, iam_errorx.ErrResetTokenInvalid):
-		response.RespondBadRequest(c, "reset token is invalid")
-	case errors.Is(err, iam_errorx.ErrResetTokenExpired):
-		response.RespondBadRequest(c, "reset token has expired")
-	case errors.Is(err, iam_errorx.ErrWeakPassword):
-		response.RespondBadRequest(c, "password does not meet requirements")
-	default:
-		response.RespondInternalError(c, "password reset failed")
-	}
-}
-
-// Logout POST /api/v1/auth/logout
-//
-// Extracts access token JTI to blacklist it, and revokes the provided refresh token.
-// Finally, clears the client cookies.
+// @Router /api/v1/auth/logout [post]
+// @Tags Auth
+// @Summary Logout
+// @Description Logout
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 401 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *AuthHandler) Logout(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -318,44 +404,105 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 
 	// 2. Get refresh token from cookie
 	refreshTokenCookie, err := c.Cookie("refresh_token")
-	if err != nil {
+	if err != nil || refreshTokenCookie == "" {
 		logger.HandlerWarn(c, "iam.auth.logout", err, "refresh token cookie not found")
-		response.RespondUnauthorized(c, "refresh token cookie not found")
-		return
-	}
-	if refreshTokenCookie == "" {
-		logger.HandlerWarn(c, "iam.auth.logout", nil, "invalid token")
-		response.RespondBadRequest(c, "invalid token")
+		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
 
 	// 3. Blacklist access token and revoke refresh token
 	if err := h.authSvc.Logout(ctx, jti, refreshTokenCookie); err != nil {
 		logger.HandlerError(c, "iam.auth.logout", err)
-		// Proceed anyway to clear cookies
 	}
 
 	// 4. Clear cookies on client
-	secureCookie := c.Request.TLS != nil
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "access_token",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    "",
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
+	clearSessionCookies(c)
 
 	logger.HandlerInfo(c, "iam.auth.logout", "user logged out successfully")
 	response.RespondSuccess(c, nil, "logged out successfully")
+}
+
+// @Router /api/v1/whoami [get]
+// @Tags Auth
+// @Summary Who am I
+// @Description Return authenticated session snapshot
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 401 {object} response.Response
+// @Failure 500 {object} response.Response
+func (h *AuthHandler) WhoAmI(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	userID := strings.TrimSpace(middleware.GetUserID(c))
+	deviceID := strings.TrimSpace(middleware.GetDeviceID(c))
+	if userID == "" || deviceID == "" {
+		response.RespondUnauthorized(c, "unauthorized")
+		return
+	}
+
+	result, err := h.authSvc.WhoAmI(ctx, userID)
+	if err != nil {
+		logger.HandlerError(c, "iam.auth.whoami", err)
+		switch {
+		case errors.Is(err, iam_errorx.ErrUserNotFound),
+			errors.Is(err, iam_errorx.ErrProfileNotFound),
+			errors.Is(err, iam_errorx.ErrRoleNotFound):
+			response.RespondUnauthorized(c, "unauthorized")
+		default:
+			response.RespondInternalError(c, "failed to load session")
+		}
+		return
+	}
+
+	logger.HandlerInfo(c, "iam.auth.whoami", "session snapshot loaded")
+
+	// Reuse small string-slice buffers on the hot /whoami path.
+	borrowStringSlice := func(pool *sync.Pool, minCap int) []string {
+		if minCap < iamPooledSliceDefaultCap {
+			minCap = iamPooledSliceDefaultCap
+		}
+		if pooled, ok := pool.Get().([]string); ok && cap(pooled) >= minCap {
+			return pooled[:0]
+		}
+		return make([]string, 0, minCap)
+	}
+	releaseStringSlice := func(pool *sync.Pool, items []string) {
+		if cap(items) == 0 || cap(items) > iamPooledSliceMaxCap {
+			return
+		}
+		full := items[:cap(items)]
+		clear(full)
+		pool.Put(full[:0])
+	}
+
+	roles := borrowStringSlice(&whoamiRolesPool, len(result.Roles))
+	roles = append(roles, result.Roles...)
+	defer releaseStringSlice(&whoamiRolesPool, roles)
+
+	permissions := borrowStringSlice(&whoamiPermsPool, len(result.Permissions))
+	permissions = append(permissions, result.Permissions...)
+	defer releaseStringSlice(&whoamiPermsPool, permissions)
+
+	response.RespondSuccess(c, iam_resdto.WhoamiResponse{
+		UserID:         result.UserID,
+		Username:       result.Username,
+		Email:          result.Email,
+		Phone:          result.Phone,
+		FullName:       result.FullName,
+		Company:        result.Company,
+		ReferralSource: result.ReferralSource,
+		JobFunction:    result.JobFunction,
+		Country:        result.Country,
+		AvatarURL:      result.AvatarURL,
+		Bio:            result.Bio,
+		Status:         result.Status,
+		OnBoarding:     result.OnBoarding,
+		Level:          result.Level,
+		AuthType:       result.AuthType,
+		SessionID:      result.SessionID,
+		Roles:          roles,
+		Permissions:    permissions,
+	}, "whoami")
 }

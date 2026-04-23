@@ -1,4 +1,4 @@
-package service
+package iam_service
 
 import (
 	"context"
@@ -19,9 +19,13 @@ import (
 )
 
 const (
-	// refreshNonceWindow is the max age of a signed nonce we accept (5 minutes).
+	// refreshProofWindow is the max age of a signed refresh proof we accept.
 	// Prevents replay attacks with stale signatures.
-	refreshNonceWindow = 5 * time.Minute
+	refreshProofWindow = 5 * time.Minute
+	// cleanupBatchSize keeps each expired-token delete query bounded.
+	cleanupBatchSize = int64(500)
+	// cleanupMaxBatches caps work per worker tick to keep latency stable.
+	cleanupMaxBatches = int64(20)
 )
 
 // TokenService implements iam_domainsvc.TokenService.
@@ -31,6 +35,7 @@ type TokenService struct {
 	userRepo   iam_domainrepo.UserRepository
 	rdb        *redis.Client
 	cfg        *config.Config
+	secrets    security.SecretProvider
 }
 
 func NewTokenService(
@@ -39,6 +44,7 @@ func NewTokenService(
 	userRepo iam_domainrepo.UserRepository,
 	rdb *redis.Client,
 	cfg *config.Config,
+	secrets security.SecretProvider,
 ) *TokenService {
 	return &TokenService{
 		tokenRepo:  tokenRepo,
@@ -46,6 +52,7 @@ func NewTokenService(
 		userRepo:   userRepo,
 		rdb:        rdb,
 		cfg:        cfg,
+		secrets:    secrets,
 	}
 }
 
@@ -53,22 +60,23 @@ func NewTokenService(
 
 // IssueAfterLogin generates a refresh token + access token for a newly
 // authenticated user/device pair. Called exclusively by AuthService.Login.
-func (s *TokenService) IssueAfterLogin(ctx context.Context, user *entity.User, device *entity.Device) (*iam_domainsvc.TokenResult, error) {
-	if s == nil || s.cfg == nil {
-		return nil, iam_errorx.ErrTokenGeneration
-	}
+func (s *TokenService) IssueAfterLogin(ctx context.Context,
+	user *entity.User, device *entity.Device) (*iam_domainsvc.TokenResult, error) {
+
 	if user == nil || device == nil {
 		return nil, iam_errorx.ErrTokenGeneration
 	}
 
 	now := time.Now().UTC()
+	accessExpiresAt := now.Add(s.cfg.Security.AccessSecretTTL)
+	refreshExpiresAt := now.Add(s.cfg.Security.RefreshTokenTTL)
 
-	refreshRaw, refreshExpiry, err := s.issueRefreshToken(ctx, user, device, now)
+	refreshRaw, err := s.issueRefreshToken(ctx, user, device, now)
 	if err != nil {
 		return nil, err
 	}
 
-	accessToken, accessExpiry, err := s.issueAccessToken(user, now)
+	accessToken, err := s.issueAccessToken(user, device.ID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -77,8 +85,8 @@ func (s *TokenService) IssueAfterLogin(ctx context.Context, user *entity.User, d
 		AccessToken:           accessToken,
 		RefreshToken:          refreshRaw,
 		DeviceID:              device.ID,
-		AccessTokenExpiresAt:  accessExpiry,
-		RefreshTokenExpiresAt: refreshExpiry,
+		AccessTokenExpiresAt:  accessExpiresAt,
+		RefreshTokenExpiresAt: refreshExpiresAt,
 	}, nil
 }
 
@@ -108,7 +116,7 @@ func (s *TokenService) IssueForMFA(ctx context.Context, userID, deviceID string)
 //  2. device_id inside the stored token must match req.DeviceID.
 //  3. Client must produce a valid Ed25519/ECDSA signature over the canonical
 //     payload using the device private key — server verifies with stored pubkey.
-//  4. Nonce timestamp must be within refreshNonceWindow (replay protection).
+//  4. Proof timestamp must be within refreshProofWindow (replay protection).
 //  5. Old token is revoked atomically before new tokens are issued.
 func (s *TokenService) Rotate(ctx context.Context, req *iam_domainsvc.RotateRequest) (*iam_domainsvc.TokenResult, error) {
 	if req == nil {
@@ -117,28 +125,16 @@ func (s *TokenService) Rotate(ctx context.Context, req *iam_domainsvc.RotateRequ
 
 	rawToken := strings.TrimSpace(req.RawRefreshToken)
 	deviceID := strings.TrimSpace(req.DeviceID)
-	if rawToken == "" || deviceID == "" || req.Signature == "" {
+	jti := strings.TrimSpace(req.JTI)
+	tokenHash := strings.TrimSpace(req.TokenHash)
+	htu := strings.TrimSpace(req.HTU)
+	htm := strings.ToUpper(strings.TrimSpace(req.HTM))
+	if rawToken == "" || deviceID == "" || jti == "" || tokenHash == "" || htm == "" || htu == "" || req.IssuedAt <= 0 {
 		return nil, iam_errorx.ErrRefreshTokenInvalid
 	}
 
-	// 1. Timestamp freshness check (replay protection).
-	reqTime := time.Unix(req.TimestampUnix, 0).UTC()
-	now := time.Now().UTC()
-	diff := now.Sub(reqTime)
-	if diff < 0 {
-		diff = -diff
-	}
-	if diff > refreshNonceWindow {
-		return nil, iam_errorx.ErrRefreshSignatureExpired
-	}
-
-	// 2. Hash raw token and look up in DB.
-	hash, err := security.HashToken(rawToken, s.cfg.Security.RefreshTokenSecret)
-	if err != nil {
-		return nil, fmt.Errorf("%w: hash: %v", iam_errorx.ErrRefreshTokenInvalid, err)
-	}
-
-	stored, err := s.tokenRepo.GetByHash(ctx, hash)
+	// 1. Hash raw token with active+previous candidates and look up in DB.
+	stored, err := s.lookupRefreshTokenByRaw(ctx, rawToken)
 	if err != nil {
 		if errors.Is(err, iam_errorx.ErrRefreshTokenInvalid) {
 			return nil, iam_errorx.ErrRefreshTokenInvalid
@@ -146,24 +142,51 @@ func (s *TokenService) Rotate(ctx context.Context, req *iam_domainsvc.RotateRequ
 		return nil, fmt.Errorf("token svc: lookup: %w", err)
 	}
 
-	// 3. Assert device ownership.
+	// 2. Assert device ownership.
 	if stored.DeviceID != deviceID {
 		return nil, iam_errorx.ErrRefreshTokenMismatch
 	}
 
-	// 4. Load device to get stored public key + algorithm.
+	// 3. Load device to get stored public key + algorithm.
 	device, err := s.deviceRepo.GetDeviceByID(ctx, deviceID)
 	if err != nil {
 		return nil, fmt.Errorf("token svc: get device: %w", err)
 	}
+	if strings.TrimSpace(device.DevicePublicKey) == "" {
+		return nil, iam_errorx.ErrRefreshDeviceUnbound
+	}
 
-	if device.DevicePublicKey == "" {
-		// Device has no enrolled key — cannot verify signature.
+	now := time.Now().UTC()
+	if strings.TrimSpace(req.Signature) == "" {
 		return nil, iam_errorx.ErrRefreshSignatureInvalid
 	}
 
+	if !strings.EqualFold(htm, "POST") {
+		return nil, iam_errorx.ErrRefreshSignatureInvalid
+	}
+
+	expectedHTU := buildAbsoluteLink(s.cfg.App.PublicURL, "/api/v1/auth/refresh", nil)
+	if htu != expectedHTU {
+		return nil, iam_errorx.ErrRefreshSignatureInvalid
+	}
+
+	expectedTokenHash := security.HashRefreshToken(rawToken)
+	if tokenHash != expectedTokenHash {
+		return nil, iam_errorx.ErrRefreshTokenInvalid
+	}
+
+	// 4. Timestamp freshness check (replay protection for signed requests).
+	reqTime := time.Unix(req.IssuedAt, 0).UTC()
+	diff := now.Sub(reqTime)
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > refreshProofWindow {
+		return nil, iam_errorx.ErrRefreshSignatureExpired
+	}
+
 	// 5. Reconstruct canonical payload and verify signature.
-	payload := security.CanonicalRefreshPayload(rawToken, deviceID, req.Nonce, req.TimestampUnix)
+	payload := security.CanonicalRefreshPayload(jti, req.IssuedAt, htm, htu, tokenHash, deviceID)
 	if err := security.VerifyDeviceSignature(
 		device.DevicePublicKey,
 		device.KeyAlgorithm,
@@ -173,15 +196,23 @@ func (s *TokenService) Rotate(ctx context.Context, req *iam_domainsvc.RotateRequ
 		return nil, iam_errorx.ErrRefreshSignatureInvalid
 	}
 
+	if err := s.reserveRefreshProof(ctx, deviceID, jti); err != nil {
+		return nil, err
+	}
+
 	// 6. Load user for access token claims.
 	user, err := s.userRepo.GetByID(ctx, stored.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("token svc: get user: %w", err)
 	}
 
-	// 7. Revoke the consumed token (invalidate-then-reissue).
-	if err := s.tokenRepo.Revoke(ctx, stored.ID); err != nil {
-		return nil, fmt.Errorf("token svc: revoke old token: %w", err)
+	// 7. Consume the presented token with CAS semantics to prevent double-rotate race.
+	consumed, err := s.tokenRepo.ConsumeActive(ctx, stored.ID)
+	if err != nil {
+		return nil, fmt.Errorf("token svc: consume old token: %w", err)
+	}
+	if !consumed {
+		return nil, iam_errorx.ErrRefreshTokenInvalid
 	}
 
 	// 8. Stamp device activity.
@@ -189,12 +220,12 @@ func (s *TokenService) Rotate(ctx context.Context, req *iam_domainsvc.RotateRequ
 	_ = s.deviceRepo.UpdateDevice(ctx, device) // best-effort
 
 	// 9. Issue new token pair.
-	refreshRaw, refreshExpiry, err := s.issueRefreshToken(ctx, user, device, now)
+	refreshRaw, err := s.issueRefreshToken(ctx, user, device, now)
 	if err != nil {
 		return nil, err
 	}
 
-	accessToken, accessExpiry, err := s.issueAccessToken(user, now)
+	accessToken, err := s.issueAccessToken(user, device.ID, now)
 	if err != nil {
 		return nil, err
 	}
@@ -203,32 +234,33 @@ func (s *TokenService) Rotate(ctx context.Context, req *iam_domainsvc.RotateRequ
 		AccessToken:           accessToken,
 		RefreshToken:          refreshRaw,
 		DeviceID:              device.ID,
-		AccessTokenExpiresAt:  accessExpiry,
-		RefreshTokenExpiresAt: refreshExpiry,
+		AccessTokenExpiresAt:  now.Add(s.cfg.Security.AccessSecretTTL),
+		RefreshTokenExpiresAt: now.Add(s.cfg.Security.RefreshTokenTTL),
 	}, nil
 }
 
 // ── private helpers ───────────────────────────────────────────────────────────
 
-func (s *TokenService) issueRefreshToken(ctx context.Context, user *entity.User, device *entity.Device, now time.Time) (string, time.Time, error) {
-	ttl := s.cfg.Security.RefreshTokenTTL
-	if ttl <= 0 {
-		ttl = 168 * time.Hour
+func (s *TokenService) issueRefreshToken(ctx context.Context, user *entity.User, device *entity.Device, now time.Time) (string, error) {
+
+	activeSecret, err := s.secrets.GetActive(security.SecretFamilyRefresh)
+	if err != nil {
+		return "", iam_errorx.ErrTokenGeneration
 	}
 
-	rawToken, err := security.GenerateToken(64, s.cfg.Security.RefreshTokenSecret)
+	rawToken, err := security.GenerateToken(64, activeSecret.Value)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: generate: %v", iam_errorx.ErrTokenGeneration, err)
+		return "", fmt.Errorf("%w: generate: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
-	hash, err := security.HashToken(rawToken, s.cfg.Security.RefreshTokenSecret)
+	hash, err := security.HashToken(rawToken, activeSecret.Value)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: hash: %v", iam_errorx.ErrTokenGeneration, err)
+		return "", fmt.Errorf("%w: hash: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
 	tokenID, err := id.Generate()
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: id: %v", iam_errorx.ErrTokenGeneration, err)
+		return "", fmt.Errorf("%w: id: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
 	rt := &entity.RefreshToken{
@@ -236,24 +268,27 @@ func (s *TokenService) issueRefreshToken(ctx context.Context, user *entity.User,
 		DeviceID:  device.ID,
 		UserID:    user.ID,
 		TokenHash: hash,
-		ExpiresAt: now.Add(ttl),
+		ExpiresAt: now.Add(s.cfg.Security.RefreshTokenTTL),
 		IsRevoked: false,
 		CreatedAt: now,
 	}
 
 	if err := s.tokenRepo.Create(ctx, rt); err != nil {
-		return "", time.Time{}, err
+		return "", err
 	}
 
-	return rawToken, now.Add(ttl), nil
+	return rawToken, nil
 }
 
-func (s *TokenService) issueAccessToken(user *entity.User, now time.Time) (string, time.Time, error) {
-	ttl := s.cfg.Security.AccessSecretTTL
+func (s *TokenService) issueAccessToken(user *entity.User, deviceID string, now time.Time) (string, error) {
+	activeSecret, err := s.secrets.GetActive(security.SecretFamilyAccess)
+	if err != nil {
+		return "", iam_errorx.ErrTokenGeneration
+	}
 
 	tokenID, err := id.Generate()
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
+		return "", fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
 	token, err := security.Sign(security.Claims{
@@ -261,37 +296,110 @@ func (s *TokenService) issueAccessToken(user *entity.User, now time.Time) (strin
 		Role:      user.Role,
 		Level:     int(user.SecurityLevel),
 		Status:    user.Status,
+		DeviceID:  strings.TrimSpace(deviceID),
 		TokenID:   tokenID,
 		IssuedAt:  now.Unix(),
 		NotBefore: now.Unix(),
-		ExpiresAt: now.Add(ttl).Unix(),
-	}, s.cfg.Security.AccessSecretKey)
+		ExpiresAt: now.Add(s.cfg.Security.AccessSecretTTL).Unix(),
+	}, activeSecret.Value)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
+		return "", fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
-	return token, now.Add(ttl), nil
+	return token, nil
 }
 
-// IsBlacklisted checks if the JTI is blacklisted in Redis.
-func (s *TokenService) IsBlacklisted(ctx context.Context, jti string) bool {
-	if jti == "" || s.rdb == nil {
-		return false
+func (s *TokenService) lookupRefreshTokenByRaw(ctx context.Context, rawToken string) (*entity.RefreshToken, error) {
+	if s == nil || s.secrets == nil {
+		return nil, iam_errorx.ErrRefreshTokenInvalid
 	}
-	key := fmt.Sprintf("iam:blacklist:%s", jti)
-	val, err := s.rdb.Get(ctx, key).Result()
-	return err == nil && val == "revoked"
+
+	candidates, err := s.secrets.GetCandidates(security.SecretFamilyRefresh)
+	if err != nil {
+		return nil, iam_errorx.ErrRefreshTokenInvalid
+	}
+	if len(candidates) == 0 {
+		return nil, iam_errorx.ErrRefreshTokenInvalid
+	}
+
+	for _, candidate := range candidates {
+		hash, err := security.HashToken(rawToken, candidate.Value)
+		if err != nil {
+			continue
+		}
+		stored, err := s.tokenRepo.GetByHash(ctx, hash)
+		if err != nil {
+			if errors.Is(err, iam_errorx.ErrRefreshTokenInvalid) {
+				continue
+			}
+			return nil, err
+		}
+		return stored, nil
+	}
+
+	return nil, iam_errorx.ErrRefreshTokenInvalid
 }
 
 // RevokeByRaw hashes the token and deletes it.
 func (s *TokenService) RevokeByRaw(ctx context.Context, rawRefreshToken string) error {
-	hash, err := security.HashToken(rawRefreshToken, s.cfg.Security.RefreshTokenSecret)
-	if err != nil {
-		return err
-	}
-	stored, err := s.tokenRepo.GetByHash(ctx, hash)
+	stored, err := s.lookupRefreshTokenByRaw(ctx, rawRefreshToken)
 	if err != nil {
 		return nil
 	}
 	return s.tokenRepo.Revoke(ctx, stored.ID)
+}
+
+// RevokeAllByUser revokes every refresh token for a user.
+func (s *TokenService) RevokeAllByUser(ctx context.Context, userID string) error {
+	userID = strings.TrimSpace(userID)
+	if userID == "" {
+		return iam_errorx.ErrRefreshTokenInvalid
+	}
+	if s == nil || s.tokenRepo == nil {
+		return iam_errorx.ErrRefreshTokenInvalid
+	}
+
+	if err := s.tokenRepo.RevokeAllByUser(ctx, userID); err != nil {
+		return fmt.Errorf("token svc: revoke all by user: %w", err)
+	}
+
+	return nil
+}
+
+// CleanupExpired removes expired refresh tokens from storage.
+func (s *TokenService) CleanupExpired(ctx context.Context) (int64, error) {
+	if s == nil || s.tokenRepo == nil {
+		return 0, nil
+	}
+
+	var totalDeleted int64
+	for i := int64(0); i < cleanupMaxBatches; i++ {
+		deleted, err := s.tokenRepo.DeleteExpiredBatch(ctx, cleanupBatchSize)
+		if err != nil {
+			return totalDeleted, fmt.Errorf("token svc: cleanup expired: %w", err)
+		}
+		totalDeleted += deleted
+		if deleted < cleanupBatchSize {
+			break
+		}
+	}
+
+	return totalDeleted, nil
+}
+
+func (s *TokenService) reserveRefreshProof(ctx context.Context, deviceID, jti string) error {
+	if s == nil || s.rdb == nil {
+		return iam_errorx.ErrRefreshSignatureInvalid
+	}
+
+	key := fmt.Sprintf("iam:refresh:proof:%s:%s", strings.TrimSpace(deviceID), strings.TrimSpace(jti))
+	ok, err := s.rdb.SetNX(ctx, key, "1", refreshProofWindow).Result()
+	if err != nil {
+		return fmt.Errorf("token svc: reserve refresh proof: %w", err)
+	}
+	if !ok {
+		return iam_errorx.ErrRefreshSignatureReplay
+	}
+
+	return nil
 }

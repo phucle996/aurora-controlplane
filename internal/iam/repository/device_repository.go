@@ -230,24 +230,6 @@ func (r *DeviceRepository) ListDevicesByUserID(ctx context.Context, userID strin
 	return devices, nil
 }
 
-func (r *DeviceRepository) RenameDevice(ctx context.Context, deviceID, userID, name string) error {
-	if r == nil || r.db == nil {
-		return iam_errorx.ErrDeviceNotFound
-	}
-
-	tag, err := r.db.Exec(ctx,
-		`UPDATE iam.devices SET device_name = $3 WHERE id = $1 AND user_id = $2`,
-		deviceID, userID, name,
-	)
-	if err != nil {
-		return fmt.Errorf("device repo: rename: %w", err)
-	}
-	if tag.RowsAffected() == 0 {
-		return iam_errorx.ErrDeviceNotFound
-	}
-
-	return nil
-}
 
 func (r *DeviceRepository) DeleteDevice(ctx context.Context, deviceID string) error {
 	if r == nil || r.db == nil {

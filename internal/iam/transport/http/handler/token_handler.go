@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"controlplane/internal/http/response"
@@ -32,7 +33,18 @@ func NewTokenHandler(tokenSvc iam_domainsvc.TokenService) *TokenHandler {
 //     a. Verifies the device signature against the stored public key.
 //     b. Revokes the presented refresh token.
 //     c. Issues a new access token + refresh token.
-//  3. Set the new tokens as HttpOnly cookies AND return them in the JSON body.
+//  3. Set the new tokens as HttpOnly cookies and return 204 No Content.
+
+// @Router /api/v1/auth/refresh [post]
+// @Tags Token
+// @Summary Refresh token
+// @Description Refresh token
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 401 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *TokenHandler) Refresh(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
@@ -47,72 +59,51 @@ func (h *TokenHandler) Refresh(c *gin.Context) {
 	refreshTokenCookie, err := c.Cookie("refresh_token")
 	if err != nil {
 		logger.HandlerWarn(c, "iam.token.refresh", err, "refresh token cookie not found")
-		response.RespondUnauthorized(c, "refresh token cookie not found")
+		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
 
 	deviceIDCookie, err := c.Cookie("device_id")
 	if err != nil {
 		logger.HandlerWarn(c, "iam.token.refresh", err, "device id cookie not found")
-		response.RespondUnauthorized(c, "device id cookie not found")
+		response.RespondUnauthorized(c, "unauthorized")
+		return
+	}
+
+	if strings.TrimSpace(req.DeviceID) != strings.TrimSpace(deviceIDCookie) {
+		logger.HandlerWarn(c, "iam.token.refresh", nil, "device id mismatch")
+		response.RespondUnauthorized(c, "refresh token is invalid or expired")
 		return
 	}
 
 	result, err := h.tokenSvc.Rotate(ctx, &iam_domainsvc.RotateRequest{
 		RawRefreshToken: refreshTokenCookie,
 		DeviceID:        deviceIDCookie,
-		Nonce:           req.Nonce,
-		TimestampUnix:   req.TimestampUnix,
+		JTI:             req.JTI,
+		IssuedAt:        req.IssuedAt,
+		HTM:             req.HTM,
+		HTU:             req.HTU,
+		TokenHash:       req.TokenHash,
 		Signature:       req.Signature,
 	})
 	if err != nil {
 		logger.HandlerError(c, "iam.token.refresh", err)
 		switch {
 		case errors.Is(err, iam_errorx.ErrRefreshTokenInvalid),
-			errors.Is(err, iam_errorx.ErrRefreshTokenMismatch):
+			errors.Is(err, iam_errorx.ErrRefreshTokenMismatch),
+			errors.Is(err, iam_errorx.ErrRefreshSignatureReplay),
+			errors.Is(err, iam_errorx.ErrRefreshDeviceUnbound),
+			errors.Is(err, iam_errorx.ErrRefreshSignatureInvalid),
+			errors.Is(err, iam_errorx.ErrRefreshSignatureExpired):
 			response.RespondUnauthorized(c, "refresh token is invalid or expired")
-		case errors.Is(err, iam_errorx.ErrRefreshSignatureInvalid):
-			response.RespondUnauthorized(c, "request signature is invalid")
-		case errors.Is(err, iam_errorx.ErrRefreshSignatureExpired):
-			response.RespondUnauthorized(c, "signed request has expired — resend with a fresh timestamp")
 		default:
-			response.RespondInternalError(c, "token refresh failed")
+			response.RespondInternalError(c, "internal server error")
 		}
 		return
 	}
 
-	// Set HttpOnly cookies so browser clients benefit automatically.
-	secureCookie := c.Request.TLS != nil
-	accessMaxAge := int(time.Until(result.AccessTokenExpiresAt).Seconds())
-	refreshMaxAge := int(time.Until(result.RefreshTokenExpiresAt).Seconds())
-
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "access_token",
-		Value:    result.AccessToken,
-		Path:     "/",
-		MaxAge:   accessMaxAge,
-		Expires:  result.AccessTokenExpiresAt,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    result.RefreshToken,
-		Path:     "/",
-		MaxAge:   refreshMaxAge,
-		Expires:  result.RefreshTokenExpiresAt,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
+	setSessionCookies(c, result.AccessToken, result.RefreshToken, result.DeviceID, result.AccessTokenExpiresAt, result.RefreshTokenExpiresAt)
 
 	logger.HandlerInfo(c, "iam.token.refresh", "token rotated")
-	response.RespondSuccess(c, gin.H{
-		"access_token":             result.AccessToken,
-		"refresh_token":            result.RefreshToken,
-		"device_id":                result.DeviceID,
-		"access_token_expires_at":  result.AccessTokenExpiresAt.Unix(),
-		"refresh_token_expires_at": result.RefreshTokenExpiresAt.Unix(),
-	}, "token refreshed")
+	c.AbortWithStatus(http.StatusNoContent)
 }

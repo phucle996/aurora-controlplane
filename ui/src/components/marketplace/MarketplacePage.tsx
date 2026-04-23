@@ -13,7 +13,7 @@ import {
 } from "@/components/workspace/api";
 
 function buildDeployHref(item: WorkspaceMarketplaceCatalogItem) {
-  return `/workspace/marketplace/deploy?resource=${encodeURIComponent(item.resource_model)}`;
+  return `/marketplace/deploy?resource=${encodeURIComponent(item.resource_model)}`;
 }
 
 function MarketplaceCard(props: { item: WorkspaceMarketplaceCatalogItem }) {

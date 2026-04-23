@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 
@@ -48,6 +49,55 @@ func (r *RbacRepository) GetRoleByName(ctx context.Context, name string) (*entit
 		return nil, err
 	}
 	return &entity.RoleWithPermissions{Role: &role, Permissions: perms}, nil
+}
+
+func (r *RbacRepository) ListRoleEntries(ctx context.Context) ([]*entity.RoleWithPermissions, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT r.id, r.name, r.level, r.description, r.created_at, r.updated_at, p.name
+		FROM iam.roles r
+		LEFT JOIN iam.role_permissions rp ON rp.role_id = r.id
+		LEFT JOIN iam.permissions p ON p.id = rp.permission_id
+		ORDER BY r.level ASC, r.name ASC, p.name ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("rbac repo: list role entries: %w", err)
+	}
+	defer rows.Close()
+
+	entries := make([]*entity.RoleWithPermissions, 0)
+	indexByRoleID := make(map[string]int)
+
+	for rows.Next() {
+		var (
+			roleRow  entity.Role
+			desc     sql.NullString
+			permName sql.NullString
+		)
+		if err := rows.Scan(
+			&roleRow.ID, &roleRow.Name, &roleRow.Level, &desc, &roleRow.CreatedAt, &roleRow.UpdatedAt, &permName,
+		); err != nil {
+			return nil, fmt.Errorf("rbac repo: scan role entry: %w", err)
+		}
+		if desc.Valid {
+			roleRow.Description = desc.String
+		}
+
+		idx, ok := indexByRoleID[roleRow.ID]
+		if !ok {
+			roleCopy := roleRow
+			entry := &entity.RoleWithPermissions{Role: &roleCopy}
+			entries = append(entries, entry)
+			indexByRoleID[roleRow.ID] = len(entries) - 1
+			idx = len(entries) - 1
+		}
+		if permName.Valid && permName.String != "" {
+			entries[idx].Permissions = append(entries[idx].Permissions, permName.String)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rbac repo: list role entries rows: %w", err)
+	}
+
+	return entries, nil
 }
 
 func (r *RbacRepository) ListRoles(ctx context.Context) ([]*entity.Role, error) {

@@ -1,22 +1,11 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { getActor } from "@/components/auth/auth-session";
+import { bootstrapSession, getActor, getProfile } from "@/components/auth/auth-session";
 import UserAddressCard from "./UserAddressCard";
 import UserInfoCard from "./UserInfoCard";
 import UserMetaCard from "./UserMetaCard";
 import type { ProfileFormData, ProfileViewData } from "./types";
-
-const emptyProfile: ProfileFormData = {
-  full_name: "",
-  company: "",
-  referral_source: "",
-  phone: "",
-  job_function: "",
-  country: "",
-  avatar_url: "",
-  bio: "",
-};
 
 export default function ProfileClient() {
   const [profile, setProfile] = useState<ProfileViewData | null>(null);
@@ -30,22 +19,17 @@ export default function ProfileClient() {
     setError("");
 
     try {
+      await bootstrapSession({ redirectOnFailure: true });
       const actor = getActor();
+      const profile = getProfile();
       if (actor == null || actor.username.trim() === "") {
         throw new Error("Your session details are not available right now.");
       }
+      if (profile == null) {
+        throw new Error("Your profile details are not available right now.");
+      }
 
-      setProfile({
-        id: actor.user_id,
-        username: actor.username,
-        email: actor.email,
-        status: "",
-        on_boarding: false,
-        profile: {
-          ...emptyProfile,
-          full_name: actor.full_name ?? "",
-        },
-      });
+      setProfile(profile);
     } catch (fetchError) {
       setError(
         fetchError instanceof Error

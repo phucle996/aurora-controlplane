@@ -1,4 +1,4 @@
-package service
+package iam_service
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"controlplane/internal/iam/domain/entity"
 	iam_domainrepo "controlplane/internal/iam/domain/repository"
 	iam_errorx "controlplane/internal/iam/errorx"
+	"controlplane/internal/security"
 	"controlplane/pkg/id"
 )
 
@@ -28,10 +29,20 @@ func NewDeviceService(repo iam_domainrepo.DeviceRepository) *DeviceService {
 
 // ── Core ─────────────────────────────────────────────────────────────────────
 
-// ResolveDevice gets or creates a device by fingerprint, refreshing its activity.
-func (s *DeviceService) ResolveDevice(ctx context.Context, userID, fingerprint, keyAlgorithm string) (*entity.Device, error) {
-	if userID == "" || fingerprint == "" {
-		return nil, fmt.Errorf("%w: userID and fingerprint are required", iam_errorx.ErrDeviceNotFound)
+// ResolveDevice gets or creates a device by fingerprint, binding the device key
+// only when the existing row has no public key yet.
+func (s *DeviceService) ResolveDevice(ctx context.Context, userID, fingerprint, publicKey, keyAlgorithm string) (*entity.Device, error) {
+	userID = strings.TrimSpace(userID)
+	fingerprint = strings.TrimSpace(fingerprint)
+	publicKey = strings.TrimSpace(publicKey)
+	keyAlgorithm = strings.TrimSpace(keyAlgorithm)
+	if userID == "" || fingerprint == "" || publicKey == "" {
+		return nil, iam_errorx.ErrDeviceBindingRequired
+	}
+
+	normalizedAlg, err := security.ValidateDevicePublicKey(publicKey, keyAlgorithm)
+	if err != nil {
+		return nil, iam_errorx.ErrDeviceKeyInvalid
 	}
 
 	existing, err := s.repo.GetDeviceByFingerprint(ctx, userID, fingerprint)
@@ -42,10 +53,10 @@ func (s *DeviceService) ResolveDevice(ctx context.Context, userID, fingerprint, 
 	now := time.Now().UTC()
 
 	if existing == nil {
-		return s.createDevice(ctx, userID, fingerprint, keyAlgorithm, now)
+		return s.createDevice(ctx, userID, fingerprint, publicKey, normalizedAlg, now)
 	}
 
-	return s.refreshDevice(ctx, existing, fingerprint, keyAlgorithm, now)
+	return s.refreshDevice(ctx, existing, fingerprint, publicKey, normalizedAlg, now)
 }
 
 // UpdateActivity stamps last_active_at for a device that is already resolved.
@@ -102,11 +113,10 @@ func (s *DeviceService) IssueChallenge(ctx context.Context, userID, deviceID str
 	return ch, nil
 }
 
-// VerifyProof validates the device's signed challenge response.
-// For now this performs a constant-time nonce echo check; swap in real
-// ECDSA/Ed25519 signature verification once device public keys are enrolled.
+// VerifyProof validates the device's signed challenge response against the
+// enrolled device public key.
 func (s *DeviceService) VerifyProof(ctx context.Context, proof *entity.DeviceProof) error {
-	if proof == nil {
+	if s == nil || s.repo == nil || proof == nil {
 		return iam_errorx.ErrDeviceProofInvalid
 	}
 
@@ -126,8 +136,12 @@ func (s *DeviceService) VerifyProof(ctx context.Context, proof *entity.DevicePro
 		return iam_errorx.ErrDeviceChallengeInvalid
 	}
 
-	// TODO: replace echo-check with real signature verification
-	if !strings.EqualFold(proof.Signature, ch.Nonce) {
+	device, err := s.repo.GetDeviceByID(ctx, ch.DeviceID)
+	if err != nil {
+		return err
+	}
+
+	if err := security.VerifyDeviceSignature(device.DevicePublicKey, device.KeyAlgorithm, ch.Nonce, proof.Signature); err != nil {
 		_ = s.repo.DeleteChallenge(ctx, ch.ChallengeID)
 		return iam_errorx.ErrDeviceProofInvalid
 	}
@@ -138,6 +152,19 @@ func (s *DeviceService) VerifyProof(ctx context.Context, proof *entity.DevicePro
 
 // RotateKey replaces the device public key after a verified proof.
 func (s *DeviceService) RotateKey(ctx context.Context, userID, deviceID, newPublicKey, newAlgorithm string) error {
+	userID = strings.TrimSpace(userID)
+	deviceID = strings.TrimSpace(deviceID)
+	newPublicKey = strings.TrimSpace(newPublicKey)
+	newAlgorithm = strings.TrimSpace(newAlgorithm)
+	if userID == "" || deviceID == "" || newPublicKey == "" {
+		return iam_errorx.ErrDeviceKeyInvalid
+	}
+
+	normalizedAlg, err := security.ValidateDevicePublicKey(newPublicKey, newAlgorithm)
+	if err != nil {
+		return iam_errorx.ErrDeviceKeyInvalid
+	}
+
 	device, err := s.repo.GetDeviceByID(ctx, deviceID)
 	if err != nil {
 		return err
@@ -146,7 +173,7 @@ func (s *DeviceService) RotateKey(ctx context.Context, userID, deviceID, newPubl
 		return iam_errorx.ErrDeviceForbidden
 	}
 
-	if err := s.repo.RotateDeviceKey(ctx, deviceID, newPublicKey, newAlgorithm); err != nil {
+	if err := s.repo.RotateDeviceKey(ctx, deviceID, newPublicKey, normalizedAlg); err != nil {
 		return fmt.Errorf("%w: %v", iam_errorx.ErrDeviceKeyRotateFailed, err)
 	}
 
@@ -154,10 +181,11 @@ func (s *DeviceService) RotateKey(ctx context.Context, userID, deviceID, newPubl
 }
 
 // Rebind re-attaches a device to a new key pair.
-// Rebind is identical to RotateKey at this abstraction; callers ensure a
-// valid proof was checked before invoking.
-func (s *DeviceService) Rebind(ctx context.Context, userID, deviceID, newPublicKey, newAlgorithm string) error {
-	return s.RotateKey(ctx, userID, deviceID, newPublicKey, newAlgorithm)
+func (s *DeviceService) Rebind(ctx context.Context, userID string, proof *entity.DeviceProof) error {
+	if err := s.VerifyProof(ctx, proof); err != nil {
+		return err
+	}
+	return s.RotateKey(ctx, userID, proof.DeviceID, proof.NewPublicKey, proof.NewAlgorithm)
 }
 
 // Revoke removes a device owned by userID and kills its tokens.
@@ -209,15 +237,6 @@ func (s *DeviceService) ListByUserID(ctx context.Context, userID string) ([]*ent
 	return s.repo.ListDevicesByUserID(ctx, userID)
 }
 
-// Rename updates the human-readable name of a device, enforcing ownership.
-func (s *DeviceService) Rename(ctx context.Context, userID, deviceID, name string) error {
-	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 64 {
-		return fmt.Errorf("%w: device name must be 1-64 characters", iam_errorx.ErrDeviceNotFound)
-	}
-	return s.repo.RenameDevice(ctx, deviceID, userID, name)
-}
-
 // RevokeOne revokes exactly one device belonging to the caller.
 func (s *DeviceService) RevokeOne(ctx context.Context, userID, deviceID string) error {
 	return s.Revoke(ctx, userID, deviceID)
@@ -265,19 +284,20 @@ func (s *DeviceService) CleanupStale(ctx context.Context, before time.Time) (int
 
 // ── private helpers ───────────────────────────────────────────────────────────
 
-func (s *DeviceService) createDevice(ctx context.Context, userID, fingerprint, keyAlgorithm string, now time.Time) (*entity.Device, error) {
+func (s *DeviceService) createDevice(ctx context.Context, userID, fingerprint, publicKey, keyAlgorithm string, now time.Time) (*entity.Device, error) {
 	deviceID, err := id.Generate()
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", iam_errorx.ErrTokenGeneration, err)
 	}
 
 	device := &entity.Device{
-		ID:           deviceID,
-		UserID:       userID,
-		Fingerprint:  fingerprint,
-		KeyAlgorithm: keyAlgorithm,
-		LastActiveAt: now,
-		CreatedAt:    now,
+		ID:              deviceID,
+		UserID:          userID,
+		Fingerprint:     fingerprint,
+		DevicePublicKey: publicKey,
+		KeyAlgorithm:    keyAlgorithm,
+		LastActiveAt:    now,
+		CreatedAt:       now,
 	}
 
 	if err := s.repo.CreateDevice(ctx, device); err != nil {
@@ -287,9 +307,12 @@ func (s *DeviceService) createDevice(ctx context.Context, userID, fingerprint, k
 	return device, nil
 }
 
-func (s *DeviceService) refreshDevice(ctx context.Context, device *entity.Device, fingerprint, keyAlgorithm string, now time.Time) (*entity.Device, error) {
+func (s *DeviceService) refreshDevice(ctx context.Context, device *entity.Device, fingerprint, publicKey, keyAlgorithm string, now time.Time) (*entity.Device, error) {
+	if strings.TrimSpace(device.DevicePublicKey) == "" {
+		device.DevicePublicKey = publicKey
+		device.KeyAlgorithm = keyAlgorithm
+	}
 	device.Fingerprint = fingerprint
-	device.KeyAlgorithm = keyAlgorithm
 	device.LastActiveAt = now
 
 	if err := s.repo.UpdateDevice(ctx, device); err != nil {

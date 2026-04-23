@@ -16,12 +16,11 @@ import "@xyflow/react/dist/style.css";
 import type { DeliveryEndpoint, TemplateItem } from "@/components/smtp/types";
 
 type DeliveryFlowCanvasProps = {
-  laneID: string;
-  laneName: string;
-  laneStatus: string;
+  gatewayName: string;
+  gatewayStatus: string;
   trafficClass: string;
-  fallbackLaneName?: string;
-  fallbackLaneStatus?: string;
+  fallbackGatewayName?: string;
+  fallbackGatewayStatus?: string;
   selectedTemplates: TemplateItem[];
   selectedEndpoints: DeliveryEndpoint[];
   availableTemplates: TemplateItem[];
@@ -40,25 +39,24 @@ type SelectionNodeData = {
   items: Array<{ id: string; title: string; meta: string }>;
 };
 
-type LaneNodeData = {
-  laneName: string;
-  laneStatus: string;
+type GatewayNodeData = {
+  gatewayName: string;
+  gatewayStatus: string;
   trafficClass: string;
   kind: "primary" | "fallback";
 };
 
 const nodeTypes = {
   selection: SelectionFlowNode,
-  lane: LaneFlowNode,
+  gateway: GatewayFlowNode,
 };
 
 export function DeliveryFlowCanvas({
-  laneID,
-  laneName,
-  laneStatus,
+  gatewayName,
+  gatewayStatus,
   trafficClass,
-  fallbackLaneName,
-  fallbackLaneStatus,
+  fallbackGatewayName,
+  fallbackGatewayStatus,
   selectedTemplates,
   selectedEndpoints,
   availableTemplates,
@@ -68,29 +66,10 @@ export function DeliveryFlowCanvas({
   isSavingTemplates,
   isSavingEndpoints,
 }: DeliveryFlowCanvasProps) {
-  const [isMounted, setIsMounted] = useState(false);
   const [isTemplateDrawerOpen, setIsTemplateDrawerOpen] = useState(false);
   const [isEndpointDrawerOpen, setIsEndpointDrawerOpen] = useState(false);
   const [templateDraftIDs, setTemplateDraftIDs] = useState<string[]>([]);
   const [endpointDraftIDs, setEndpointDraftIDs] = useState<string[]>([]);
-
-  useEffect(() => {
-    setIsMounted(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isTemplateDrawerOpen) {
-      return;
-    }
-    setTemplateDraftIDs(selectedTemplates.map((item) => item.id));
-  }, [isTemplateDrawerOpen, selectedTemplates]);
-
-  useEffect(() => {
-    if (!isEndpointDrawerOpen) {
-      return;
-    }
-    setEndpointDraftIDs(selectedEndpoints.map((item) => item.id));
-  }, [isEndpointDrawerOpen, selectedEndpoints]);
 
   const selectedTemplateSet = useMemo(() => new Set(templateDraftIDs), [templateDraftIDs]);
   const selectedEndpointSet = useMemo(() => new Set(endpointDraftIDs), [endpointDraftIDs]);
@@ -116,9 +95,9 @@ export function DeliveryFlowCanvas({
   );
 
   const isFallbackServing = Boolean(
-    fallbackLaneName &&
-      normalizeStatus(fallbackLaneStatus) === "active" &&
-      normalizeStatus(laneStatus) !== "active",
+    fallbackGatewayName &&
+      normalizeStatus(fallbackGatewayStatus) === "active" &&
+      normalizeStatus(gatewayStatus) !== "active",
   );
 
   const nodes = useMemo<Node[]>(
@@ -133,23 +112,23 @@ export function DeliveryFlowCanvas({
           data: {
             eyebrow: "Templates",
             subtitle: `${selectedTemplates.length} selected`,
-            emptyText: "No template is routed into this lane yet.",
+            emptyText: "No template is routed into this gateway yet.",
             side: "left",
             items: templateItems,
           } satisfies SelectionNodeData,
         },
         {
           id: "lane",
-          type: "lane",
+          type: "gateway",
           position: { x: 455, y: 120 },
           draggable: false,
           selectable: false,
           data: {
-            laneName,
-            laneStatus,
+            gatewayName,
+            gatewayStatus,
             trafficClass,
             kind: "primary",
-          } satisfies LaneNodeData,
+          } satisfies GatewayNodeData,
         },
         {
           id: "endpoints",
@@ -160,26 +139,26 @@ export function DeliveryFlowCanvas({
           data: {
             eyebrow: "Endpoints",
             subtitle: `${selectedEndpoints.length} selected`,
-            emptyText: "No endpoint is attached to this lane yet.",
+            emptyText: "No endpoint is attached to this gateway yet.",
             side: "right",
             items: endpointItems,
           } satisfies SelectionNodeData,
         },
       ];
 
-      if (fallbackLaneName) {
+      if (fallbackGatewayName) {
         baseNodes.push({
           id: "fallback",
-          type: "lane",
+          type: "gateway",
           position: { x: 480, y: 360 },
           draggable: false,
           selectable: false,
           data: {
-            laneName: fallbackLaneName,
-            laneStatus: fallbackLaneStatus || "disabled",
+            gatewayName: fallbackGatewayName,
+            gatewayStatus: fallbackGatewayStatus || "disabled",
             trafficClass,
             kind: "fallback",
-          } satisfies LaneNodeData,
+          } satisfies GatewayNodeData,
         });
       }
 
@@ -187,10 +166,10 @@ export function DeliveryFlowCanvas({
     },
     [
       endpointItems,
-      fallbackLaneName,
-      fallbackLaneStatus,
-      laneName,
-      laneStatus,
+      fallbackGatewayName,
+      fallbackGatewayStatus,
+      gatewayName,
+      gatewayStatus,
       selectedEndpoints.length,
       selectedTemplates.length,
       templateItems,
@@ -213,9 +192,9 @@ export function DeliveryFlowCanvas({
         },
       ];
 
-      if (fallbackLaneName) {
+      if (fallbackGatewayName) {
         flowEdges.push({
-          id: "lane-to-fallback",
+          id: "gateway-to-fallback",
           source: "lane",
           target: "fallback",
           sourceHandle: "out-bottom",
@@ -245,7 +224,7 @@ export function DeliveryFlowCanvas({
 
       return flowEdges;
     },
-    [fallbackLaneName, isFallbackServing, selectedEndpoints.length, selectedTemplates.length],
+    [fallbackGatewayName, isFallbackServing, selectedEndpoints.length, selectedTemplates.length],
   );
 
   async function handleTemplateSave() {
@@ -266,47 +245,43 @@ export function DeliveryFlowCanvas({
     <>
       <div className="overflow-hidden rounded-[28px] border border-gray-200 bg-[radial-gradient(circle_at_top,_rgba(59,130,246,0.08),_transparent_32%),linear-gradient(180deg,rgba(255,255,255,0.96),rgba(248,250,252,0.98))] dark:border-gray-700 dark:bg-[radial-gradient(circle_at_top,_rgba(56,189,248,0.08),_transparent_32%),linear-gradient(180deg,rgba(17,24,39,0.94),rgba(17,24,39,0.98))]">
         <div className="h-[560px] w-full">
-          {isMounted ? (
-            <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              nodeTypes={nodeTypes}
-              onNodeClick={(_, node) => {
-                if (node.id === "templates") {
-                  setIsTemplateDrawerOpen(true);
-                  return;
-                }
-                if (node.id === "endpoints") {
-                  setIsEndpointDrawerOpen(true);
-                }
-              }}
-              fitView
-              fitViewOptions={{ padding: 0.12, minZoom: 0.9, maxZoom: 1 }}
-              nodesDraggable={false}
-              nodesConnectable={false}
-              elementsSelectable={false}
-              panOnDrag={false}
-              zoomOnScroll={false}
-              zoomOnPinch={false}
-              zoomOnDoubleClick={false}
-              preventScrolling={false}
-              proOptions={{ hideAttribution: true }}
-              className="bg-transparent"
-            >
-              <Background gap={26} size={1.2} color="#dbe4f0" />
-            </ReactFlow>
-          ) : (
-            <div className="flex h-full items-center justify-center text-sm text-gray-500 dark:text-gray-400">
-              Loading routing flow...
-            </div>
-          )}
+          <ReactFlow
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodeClick={(_, node) => {
+              if (node.id === "templates") {
+                setTemplateDraftIDs(selectedTemplates.map((item) => item.id));
+                setIsTemplateDrawerOpen(true);
+                return;
+              }
+              if (node.id === "endpoints") {
+                setEndpointDraftIDs(selectedEndpoints.map((item) => item.id));
+                setIsEndpointDrawerOpen(true);
+              }
+            }}
+            fitView
+            fitViewOptions={{ padding: 0.12, minZoom: 0.9, maxZoom: 1 }}
+            nodesDraggable={false}
+            nodesConnectable={false}
+            elementsSelectable={false}
+            panOnDrag={false}
+            zoomOnScroll={false}
+            zoomOnPinch={false}
+            zoomOnDoubleClick={false}
+            preventScrolling={false}
+            proOptions={{ hideAttribution: true }}
+            className="bg-transparent"
+          >
+            <Background gap={26} size={1.2} color="#dbe4f0" />
+          </ReactFlow>
         </div>
       </div>
 
       <SelectionDrawer
         open={isTemplateDrawerOpen}
         title="Select Templates"
-        subtitle="Choose which templates route into this lane. Changes are only saved when you press Save."
+        subtitle="Choose which templates route into this gateway. Changes are only saved when you press Save."
         items={availableTemplates.map((item) => ({
           id: item.id,
           title: item.name,
@@ -322,7 +297,7 @@ export function DeliveryFlowCanvas({
       <SelectionDrawer
         open={isEndpointDrawerOpen}
         title="Select Endpoints"
-        subtitle="Choose which endpoints this lane can send through. Changes are only saved when you press Save."
+        subtitle="Choose which endpoints this gateway can send through. Changes are only saved when you press Save."
         items={availableEndpoints.map((item) => ({
           id: item.id,
           title: item.name,
@@ -393,7 +368,7 @@ function SelectionFlowNode({ data }: NodeProps<Node<SelectionNodeData>>) {
   );
 }
 
-function LaneFlowNode({ data }: NodeProps<Node<LaneNodeData>>) {
+function GatewayFlowNode({ data }: NodeProps<Node<GatewayNodeData>>) {
   const isFallback = data.kind === "fallback";
   return (
     <div
@@ -410,13 +385,13 @@ function LaneFlowNode({ data }: NodeProps<Node<LaneNodeData>>) {
       ) : (
         <Handle type="source" id="out-bottom" position={Position.Bottom} className="!h-3 !w-3 !border-2 !border-white !bg-slate-400" />
       )}
-      <p className="text-[11px] font-medium tracking-[0.22em] text-gray-400 uppercase">{isFallback ? "Fallback Lane" : "Lane"}</p>
-      <h4 className="mt-3 text-2xl font-semibold tracking-tight text-gray-900 dark:text-white">{data.laneName}</h4>
+      <p className="text-[11px] font-medium tracking-[0.22em] text-gray-400 uppercase">{isFallback ? "Fallback Gateway" : "Gateway"}</p>
+      <h4 className="mt-3 text-2xl font-semibold tracking-tight text-gray-900 dark:text-white">{data.gatewayName}</h4>
       <div className="mt-4 flex justify-center">
-        <StatusPill status={data.laneStatus} />
+        <StatusPill status={data.gatewayStatus} />
       </div>
       <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-left dark:border-gray-800 dark:bg-gray-950/60">
-        <LaneInfoRow label="Traffic Class" value={data.trafficClass} />
+        <GatewayInfoRow label="Traffic Class" value={data.trafficClass} />
       </div>
     </div>
   );
@@ -443,23 +418,8 @@ function SelectionDrawer({
   onToggle: (id: string) => void;
   onSave: () => void;
 }) {
-  const [shouldRender, setShouldRender] = useState(open);
-  const [isVisible, setIsVisible] = useState(false);
-
   useEffect(() => {
-    if (open) {
-      setShouldRender(true);
-      const frame = window.requestAnimationFrame(() => setIsVisible(true));
-      return () => window.cancelAnimationFrame(frame);
-    }
-
-    setIsVisible(false);
-    const timer = window.setTimeout(() => setShouldRender(false), 220);
-    return () => window.clearTimeout(timer);
-  }, [open]);
-
-  useEffect(() => {
-    if (!shouldRender) {
+    if (!open) {
       return;
     }
     const onKeyDown = (event: KeyboardEvent) => {
@@ -469,9 +429,9 @@ function SelectionDrawer({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onClose, shouldRender]);
+  }, [onClose, open]);
 
-  if (!shouldRender || typeof document === "undefined") {
+  if (!open || typeof document === "undefined") {
     return null;
   }
 
@@ -481,14 +441,10 @@ function SelectionDrawer({
         type="button"
         aria-label="Close drawer"
         onClick={onClose}
-        className={`h-full flex-1 bg-gray-950/50 backdrop-blur-sm transition duration-200 ease-out ${
-          isVisible ? "opacity-100" : "opacity-0"
-        }`}
+        className="h-full flex-1 bg-gray-950/50 backdrop-blur-sm"
       />
       <div
-        className={`flex h-full w-full max-w-[430px] flex-col border-l border-gray-200 bg-white shadow-2xl transition duration-200 ease-out dark:border-gray-800 dark:bg-gray-950 ${
-          isVisible ? "translate-x-0 opacity-100" : "translate-x-8 opacity-0"
-        }`}
+        className="flex h-full w-full max-w-[430px] flex-col border-l border-gray-200 bg-white shadow-2xl dark:border-gray-800 dark:bg-gray-950"
       >
         <div className="border-b border-gray-200 px-6 py-5 dark:border-gray-800">
           <div className="flex items-start justify-between gap-4">
@@ -581,7 +537,7 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-function LaneInfoRow({ label, value }: { label: string; value: string }) {
+function GatewayInfoRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-3">
       <span className="text-xs font-medium tracking-[0.18em] text-gray-400 uppercase">{label}</span>

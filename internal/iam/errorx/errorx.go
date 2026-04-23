@@ -26,6 +26,8 @@ var (
 	ErrDeviceChallengeNotFound = errors.New("device challenge not found")
 	ErrDeviceProofInvalid      = errors.New("device proof signature invalid")
 	ErrDeviceKeyRotateFailed   = errors.New("device key rotation failed")
+	ErrDeviceBindingRequired   = errors.New("device binding required")
+	ErrDeviceKeyInvalid        = errors.New("device key invalid")
 
 	// Password reset
 	ErrResetTokenInvalid = errors.New("password reset token invalid")
@@ -38,6 +40,12 @@ var (
 	ErrRefreshTokenMismatch    = errors.New("refresh token device mismatch")
 	ErrRefreshSignatureInvalid = errors.New("refresh request signature invalid")
 	ErrRefreshSignatureExpired = errors.New("refresh request signature timestamp expired")
+	ErrRefreshSignatureReplay  = errors.New("refresh request already used")
+	ErrRefreshDeviceUnbound    = errors.New("refresh token device is not bound")
+
+	// Admin API key login
+	ErrAdminAPIKeyInvalid   = errors.New("admin api key is invalid")
+	ErrAdminAPIKeyAuthError = errors.New("admin api key auth unavailable")
 
 	// MFA
 	ErrMfaSettingNotFound   = errors.New("mfa setting not found")

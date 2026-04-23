@@ -6,7 +6,7 @@ import { bootstrapSession, installAuthFetchInterceptor } from "./auth-session";
 export default function AuthBootstrap() {
   useEffect(() => {
     installAuthFetchInterceptor();
-    void bootstrapSession();
+    void bootstrapSession({ redirectOnFailure: true });
   }, []);
 
   return null;

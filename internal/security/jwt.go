@@ -48,6 +48,8 @@ type Claims struct {
 	Role      string `json:"role,omitempty"`
 	Level     int    `json:"lvl"` // security level: 0=highest, higher=lower
 	Status    string `json:"status,omitempty"`
+	TenantID  string `json:"tenant_id,omitempty"`
+	DeviceID  string `json:"device_id,omitempty"`
 	TokenID   string `json:"jti,omitempty"`
 	Issuer    string `json:"iss,omitempty"`
 	Audience  string `json:"aud,omitempty"`

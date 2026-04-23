@@ -3,18 +3,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { SMTPPageShell } from "@/components/smtp/SMTPPageShell";
-import { parseAPIError } from "@/components/auth/auth-utils";
-
-type ConsumerListResponse = {
-  items?: Array<{
-    id: string;
-    name: string;
-  }>;
-};
-
-type CreateTemplateResponse = {
-  id: string;
-};
+import { createTemplate, listConsumerOptions } from "@/components/smtp/api";
+import { useSMTPWorkspace } from "@/components/smtp/SMTPWorkspaceProvider";
 
 type TemplateFormState = {
   name: string;
@@ -29,7 +19,16 @@ type TemplateFormState = {
 };
 
 export default function NewTemplateForm() {
+  return (
+    <SMTPPageShell>
+      <NewTemplateFormContent />
+    </SMTPPageShell>
+  );
+}
+
+function NewTemplateFormContent() {
   const router = useRouter();
+  const { workspace, workspaceID, isLoading: isWorkspaceLoading, error: workspaceError } = useSMTPWorkspace();
   const [form, setForm] = useState<TemplateFormState>({
     name: "",
     category: "",
@@ -49,24 +48,24 @@ export default function NewTemplateForm() {
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
+    if (workspaceID === "") {
+      setConsumers([]);
+      return;
+    }
+
     let cancelled = false;
 
     async function loadConsumers() {
       try {
-        const response = await fetch("/api/v1/smtp/consumers", {
-          method: "GET",
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          return;
-        }
-
-        const result = (await response.json()) as ConsumerListResponse;
+        const result = await listConsumerOptions(workspaceID);
         if (cancelled) {
           return;
         }
 
-        const nextConsumers = result.items ?? [];
+        const nextConsumers = result.map((item) => ({
+          id: item.id,
+          name: item.label,
+        }));
         setConsumers(nextConsumers);
       } catch {
         if (!cancelled) {
@@ -79,7 +78,7 @@ export default function NewTemplateForm() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [workspaceID]);
 
   function updateField<K extends keyof TemplateFormState>(key: K, value: TemplateFormState[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -126,31 +125,24 @@ export default function NewTemplateForm() {
     setSubmitError("");
 
     try {
-      const response = await fetch("/api/v1/smtp/templates", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          name: form.name.trim(),
-          category: form.category.trim(),
-          traffic_class: form.trafficClass.trim(),
-          subject: form.subject.trim(),
-          from_email: form.fromEmail.trim(),
-          to_email: form.toEmail.trim(),
-          status: form.status.trim(),
-          consumer_id: form.consumerID.trim(),
-          body: form.body,
-        }),
-      });
-
-      if (!response.ok) {
-        setSubmitError(await parseAPIError(response));
+      if (workspaceID === "") {
+        setSubmitError("Choose a workspace first.");
         return;
       }
-
-      await response.json().catch(() => ({} as CreateTemplateResponse));
-      router.push("/smtp/templates");
+      await createTemplate(workspaceID, {
+        name: form.name.trim(),
+        category: form.category.trim(),
+        traffic_class: form.trafficClass.trim(),
+        subject: form.subject.trim(),
+        from_email: form.fromEmail.trim(),
+        to_email: form.toEmail.trim(),
+        status: form.status.trim(),
+        consumer_id: form.consumerID.trim(),
+        variables: [],
+        text_body: form.body,
+        html_body: form.body.replaceAll("\n", "<br/>"),
+      });
+      router.push(`/smtp/templates?workspace=${workspaceID}`);
     } catch {
       setSubmitError("Failed to save template.");
     } finally {
@@ -159,9 +151,8 @@ export default function NewTemplateForm() {
   }
 
   return (
-    <SMTPPageShell>
-      <div className="space-y-6">
-        <div className="rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
+    <div className="space-y-6">
+      <div className="rounded-2xl border border-gray-200 bg-white dark:border-gray-800 dark:bg-white/[0.03]">
           <div className="flex items-start justify-between gap-4 px-6 py-5">
             <div>
               <h3 className="text-base font-medium text-gray-800 dark:text-white/90">
@@ -195,7 +186,22 @@ export default function NewTemplateForm() {
               <div className="rounded-2xl border border-error-200 bg-error-50 px-4 py-3 text-sm text-error-700 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-300">
                 {submitError}
               </div>
+            ) : workspaceError !== "" ? (
+              <div className="rounded-2xl border border-error-200 bg-error-50 px-4 py-3 text-sm text-error-700 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-300">
+                {workspaceError}
+              </div>
+            ) : workspace == null ? (
+              <div className="rounded-2xl border border-error-200 bg-error-50 px-4 py-3 text-sm text-error-700 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-300">
+                No workspace is available for SMTP yet.
+              </div>
             ) : null}
+
+            <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 dark:border-gray-800 dark:bg-gray-900/40">
+              <p className="text-xs font-medium tracking-[0.18em] text-gray-400 uppercase">Workspace</p>
+              <p className="mt-2 text-sm font-semibold text-gray-900 dark:text-white">
+                {workspace?.name ?? (isWorkspaceLoading ? "Loading..." : "No workspace selected")}
+              </p>
+            </div>
 
             <div className="grid gap-4 xl:grid-cols-[3fr_7fr]">
               <div className="space-y-4">
@@ -281,9 +287,8 @@ export default function NewTemplateForm() {
               </div>
             </div>
           </div>
-        </div>
       </div>
-    </SMTPPageShell>
+    </div>
   );
 }
 

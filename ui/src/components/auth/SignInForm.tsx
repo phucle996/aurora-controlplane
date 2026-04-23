@@ -8,8 +8,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import React, { FormEvent, useEffect, useState } from "react";
 import AuthShell from "./AuthShell";
-import { startSession } from "./auth-session";
+import { hydrateSessionFromWhoAmI } from "./auth-session";
 import { parseAPIError } from "./auth-utils";
+import { ensureLoginDeviceBinding, type LoginDeviceBinding } from "./device-binding";
 import { useToast } from "../ui/toast/ToastProvider";
 
 type APIResponse<T> = {
@@ -22,7 +23,6 @@ type LoginResponseData = {
   mfa_required?: boolean;
   challenge_id?: string;
   available_methods?: string[];
-  access_token?: string;
 };
 
 export default function SignInForm() {
@@ -39,8 +39,26 @@ export default function SignInForm() {
   const [selectedMFAMethod, setSelectedMFAMethod] = useState("");
   const [mfaCode, setMFACode] = useState("");
   const [mfaChallengeID, setMFAChallengeID] = useState("");
+  const [deviceBinding, setDeviceBinding] = useState<LoginDeviceBinding | null>(null);
+  const [deviceBindingReady, setDeviceBindingReady] = useState(false);
 
   useEffect(() => {
+    let cancelled = false;
+    void ensureLoginDeviceBinding()
+      .then((binding) => {
+        if (cancelled) {
+          return;
+        }
+        setDeviceBinding(binding);
+        setDeviceBindingReady(true);
+      })
+      .catch((err) => {
+        if (cancelled) {
+          return;
+        }
+        setError(err instanceof Error && err.message.trim() !== "" ? err.message : "Device binding is unavailable.");
+      });
+
     const params = new URLSearchParams(window.location.search);
     const usernameFromQuery = params.get("username")?.trim() ?? "";
 
@@ -54,6 +72,9 @@ export default function SignInForm() {
       pushToast({ message: signupMessage, kind: "success" });
       window.sessionStorage.removeItem("auth:signup-success-message");
     }
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function resetMFAStep() {
@@ -76,11 +97,13 @@ export default function SignInForm() {
     }
   }
 
-  function completeSignIn(accessToken: string) {
-    startSession({
-      accessToken,
-      username: username.trim().toLowerCase(),
-    });
+  async function completeSignIn() {
+    const session = await hydrateSessionFromWhoAmI();
+    if (session == null) {
+      setError("Signed in, but the session details were missing.");
+      return;
+    }
+
     router.replace("/");
   }
 
@@ -110,14 +133,12 @@ export default function SignInForm() {
           return;
         }
 
-        const result = (await response.json()) as APIResponse<LoginResponseData>;
-        const accessToken = result.data?.access_token?.trim() ?? "";
-        if (accessToken === "") {
-          setError("Signed in, but the session token was missing.");
-          return;
-        }
+        await completeSignIn();
+        return;
+      }
 
-        completeSignIn(accessToken);
+      if (!deviceBindingReady || deviceBinding == null) {
+        setError("Device binding is not ready yet. Please try again.");
         return;
       }
 
@@ -131,11 +152,17 @@ export default function SignInForm() {
         body: JSON.stringify({
           username,
           password,
+          ...deviceBinding,
         }),
       });
 
       if (!response.ok) {
         setError(await parseAPIError(response));
+        return;
+      }
+
+      if (response.status === 204) {
+        await completeSignIn();
         return;
       }
 
@@ -169,13 +196,7 @@ export default function SignInForm() {
         return;
       }
 
-      const accessToken = data.access_token?.trim() ?? "";
-      if (accessToken === "") {
-        setError("Signed in, but the session token was missing.");
-        return;
-      }
-
-      completeSignIn(accessToken);
+      await completeSignIn();
     } catch (err) {
       if (err instanceof Error && err.message.trim() !== "") {
         setError(err.message);
@@ -276,7 +297,7 @@ export default function SignInForm() {
             <Button
               type="submit"
               size="sm"
-              disabled={submitting || username.trim() === "" || password === ""}
+              disabled={submitting || username.trim() === "" || password === "" || !deviceBindingReady}
               className="w-full rounded-lg py-3.5"
             >
               {submitting ? "Signing in..." : "Sign in"}

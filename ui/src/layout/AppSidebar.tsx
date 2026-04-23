@@ -55,16 +55,6 @@ const navItems: NavItem[] = [
       { name: "Firewall", path: "/firewall", pro: false },
     ],
   },
-  {
-    icon: <BoxCubeIcon />,
-    name: "Workspace",
-    subItems: [
-      { name: "My Workspace", path: "/workspace", pro: false },
-      { name: "Namespaces", path: "/workspace/namespaces", pro: false },
-      { name: "Marketplace", path: "/workspace/marketplace", pro: false },
-      { name: "Network Policies", path: "/workspace/network-policies", pro: false },
-    ],
-  },
 
   {
     name: "Forms",
@@ -128,6 +118,12 @@ const settingsItem: NavItem = {
       />
     </svg>
   ),
+};
+
+const organizationItem: NavItem = {
+  icon: <UserCircleIcon />,
+  name: "Organization",
+  path: "/organization",
 };
 
 const AppSidebar: React.FC = () => {
@@ -271,7 +267,7 @@ const AppSidebar: React.FC = () => {
 
   // const isActive = (path: string) => path === pathname;
    const isActive = useCallback((path: string) => {
-    if (path === "/" || path === "/workspace") {
+    if (path === "/") {
       return pathname === path;
     }
     return pathname === path || pathname.startsWith(`${path}/`);
@@ -417,6 +413,29 @@ const AppSidebar: React.FC = () => {
         </nav>
         <div className="mt-auto border-t border-gray-200 pt-4 dark:border-gray-800">
           <ul className="flex flex-col gap-4">
+            <li>
+              <Link
+                href={organizationItem.path ?? "/organization"}
+                className={`menu-item group ${
+                  isActive(organizationItem.path ?? "/organization")
+                    ? "menu-item-active"
+                    : "menu-item-inactive"
+                }`}
+              >
+                <span
+                  className={`${
+                    isActive(organizationItem.path ?? "/organization")
+                      ? "menu-item-icon-active"
+                      : "menu-item-icon-inactive"
+                  }`}
+                >
+                  {organizationItem.icon}
+                </span>
+                {(isExpanded || isHovered || isMobileOpen) && (
+                  <span className="menu-item-text">{organizationItem.name}</span>
+                )}
+              </Link>
+            </li>
             <li>
               <Link
                 href={settingsItem.path ?? "/settings"}

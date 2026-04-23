@@ -1,8 +1,11 @@
 package iam_reqdto
 
 type LoginRequest struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
+	Username           string `json:"username" binding:"required"`
+	Password           string `json:"password" binding:"required"`
+	DeviceFingerprint  string `json:"device_fingerprint" binding:"required"`
+	DevicePublicKey    string `json:"device_public_key" binding:"required"`
+	DeviceKeyAlgorithm string `json:"device_key_algorithm,omitempty"`
 }
 
 type RegisterRequest struct {
@@ -12,4 +15,8 @@ type RegisterRequest struct {
 	PhoneNumber *string `json:"phone_number,omitempty"`
 	Password    string  `json:"password" binding:"required,min=8"`
 	RePassword  string  `json:"re_password" binding:"required,min=8"`
+}
+
+type AdminAPIKeyLoginRequest struct {
+	APIKey string `json:"api_key" binding:"required"`
 }

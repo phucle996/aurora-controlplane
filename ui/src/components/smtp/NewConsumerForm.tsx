@@ -3,9 +3,11 @@
 import React, { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useDropzone } from "react-dropzone";
-import { parseAPIError } from "@/components/auth/auth-utils";
 import ComponentCard from "@/components/common/ComponentCard";
 import PageBreadcrumb from "@/components/common/PageBreadCrumb";
+import { createConsumer, tryConnectConsumer } from "@/components/smtp/api";
+import { SMTPPageShell } from "@/components/smtp/SMTPPageShell";
+import { useSMTPWorkspace } from "@/components/smtp/SMTPWorkspaceProvider";
 
 type TransportID = "redis-stream" | "rabbitmq" | "kafka" | "nats";
 type TLSMode = "disabled" | "tls" | "mtls";
@@ -126,7 +128,16 @@ function emptyConsumerForm(): ConsumerFormState {
 }
 
 export default function NewConsumerForm() {
+  return (
+    <SMTPPageShell>
+      <NewConsumerFormContent />
+    </SMTPPageShell>
+  );
+}
+
+function NewConsumerFormContent() {
   const router = useRouter();
+  const { workspace, workspaceID, error: workspaceError } = useSMTPWorkspace();
   const [form, setForm] = useState<ConsumerFormState>(emptyConsumerForm());
   const [fieldErrors, setFieldErrors] = useState<Partial<Record<keyof ConsumerFormState, string>>>(
     {},
@@ -229,6 +240,7 @@ export default function NewConsumerForm() {
     }
 
     return {
+      zone_id: workspace?.defaultZoneID ?? "",
       name: form.name.trim(),
       transport_type: form.transportType,
       source: form.source.trim(),
@@ -247,28 +259,26 @@ export default function NewConsumerForm() {
       setSubmitResult(null);
       return;
     }
+    if (workspaceID === "") {
+      setSubmitResult({ tone: "error", message: "Choose a workspace first." });
+      return;
+    }
+    if ((workspace?.defaultZoneID ?? "").trim() === "") {
+      setSubmitResult({ tone: "error", message: "The selected workspace does not have a default zone yet." });
+      return;
+    }
 
     setIsSaving(true);
     setSubmitResult(null);
 
     try {
-      const response = await fetch("/api/v1/smtp/consumers", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(await parseAPIError(response));
-      }
+      await createConsumer(workspaceID, payload);
 
       setSubmitResult({
         tone: "success",
         message: "Consumer saved successfully.",
       });
-      router.push("/smtp/consumers");
+      router.push(`/smtp/consumers?workspace=${workspaceID}`);
     } catch (err) {
       setSubmitResult({
         tone: "error",
@@ -285,30 +295,23 @@ export default function NewConsumerForm() {
       setSubmitResult(null);
       return;
     }
+    if (workspaceID === "") {
+      setSubmitResult({ tone: "error", message: "Choose a workspace first." });
+      return;
+    }
+    if ((workspace?.defaultZoneID ?? "").trim() === "") {
+      setSubmitResult({ tone: "error", message: "The selected workspace does not have a default zone yet." });
+      return;
+    }
 
     setIsTryingConnect(true);
     setSubmitResult(null);
 
     try {
-      const response = await fetch("/api/v1/smtp/consumers/try-connect", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!response.ok) {
-        throw new Error(await parseAPIError(response));
-      }
-
-      const result = (await response.json().catch(() => null)) as { message?: string } | null;
+      const message = await tryConnectConsumer(workspaceID, payload);
       setSubmitResult({
         tone: "success",
-        message:
-          typeof result?.message === "string" && result.message.trim() !== ""
-            ? result.message
-            : "Consumer connection succeeded.",
+        message,
       });
     } catch (err) {
       setSubmitResult({
@@ -329,11 +332,33 @@ export default function NewConsumerForm() {
         desc="Create a live SMTP consumer and verify the transport connection before enabling runtime delivery."
       >
         <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
-          <div className="space-y-5">
-            <Field label="Consumer name">
-              <TextInput
-                placeholder="smtp.redis.primary"
-                value={form.name}
+            <div className="space-y-5">
+              {workspaceError !== "" ? (
+                <SubmitBanner tone="error" message={workspaceError} />
+              ) : workspace == null ? (
+                <SubmitBanner tone="error" message="No workspace is available for SMTP yet." />
+              ) : workspace.defaultZoneID === "" ? (
+                <SubmitBanner
+                  tone="error"
+                  message="The selected workspace does not have a default zone yet."
+                />
+              ) : (
+                <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 dark:border-gray-800 dark:bg-gray-900/40">
+                  <p className="text-xs font-medium tracking-[0.18em] text-gray-400 uppercase">
+                    Workspace / zone
+                  </p>
+                  <p className="mt-2 text-sm font-semibold text-gray-900 dark:text-white">
+                    {workspace.name}
+                  </p>
+                  <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
+                    {workspace.defaultZoneName || "No default zone linked"}
+                  </p>
+                </div>
+              )}
+              <Field label="Consumer name">
+                <TextInput
+                  placeholder="smtp.redis.primary"
+                  value={form.name}
                 onChange={(value) => updateField("name", value)}
                 error={fieldErrors.name}
               />
@@ -368,9 +393,9 @@ export default function NewConsumerForm() {
                 onChange={(value) => updateField("note", value)}
               />
             </Field>
-          </div>
+            </div>
 
-          <div className="space-y-5">
+            <div className="space-y-5">
             <Field label="Transport type">
               <div className="grid gap-3 md:grid-cols-2">
                 {transportOptions.map((option) => {
@@ -548,7 +573,7 @@ export default function NewConsumerForm() {
                 {isTryingConnect ? "Trying..." : "Try Connect"}
               </button>
             </div>
-          </div>
+            </div>
         </div>
       </ComponentCard>
     </div>
@@ -569,6 +594,26 @@ function Field({
       </span>
       {children}
     </label>
+  );
+}
+
+function SubmitBanner({
+  tone,
+  message,
+}: {
+  tone: SubmitTone;
+  message: string;
+}) {
+  return (
+    <div
+      className={`rounded-2xl border px-4 py-4 text-sm ${
+        tone === "success"
+          ? "border-success-200 bg-success-50 text-success-700 dark:border-success-500/30 dark:bg-success-500/10 dark:text-success-300"
+          : "border-error-200 bg-error-50 text-error-700 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-300"
+      }`}
+    >
+      {message}
+    </div>
   );
 }
 

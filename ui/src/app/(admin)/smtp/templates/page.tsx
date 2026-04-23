@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import React from "react";
+import React, { Suspense } from "react";
 import { SMTPTemplatesPage } from "@/components/smtp/SMTPWorkspace";
 
 export const metadata: Metadata = {
@@ -8,5 +8,9 @@ export const metadata: Metadata = {
 };
 
 export default function SMTPTemplatesRoutePage() {
-  return <SMTPTemplatesPage />;
+  return (
+    <Suspense fallback={null}>
+      <SMTPTemplatesPage />
+    </Suspense>
+  );
 }

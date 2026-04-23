@@ -2,12 +2,26 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TLS_ROOT="${ROOT_DIR}/.local/tls"
+TLS_ROOT="${ROOT_DIR}/.testinfra/tls"
 CA_DIR="${TLS_ROOT}/ca"
 PSQL_DIR="${TLS_ROOT}/postgres"
 REDIS_DIR="${TLS_ROOT}/redis"
 COMPOSE_FILE="${ROOT_DIR}/docker-compose.local.yml"
 ENV_FILE="${ROOT_DIR}/package/env.prod"
+RESET=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reset)
+      RESET=true
+      shift
+      ;;
+    *)
+      echo "Usage: $0 [--reset]"
+      exit 1
+      ;;
+  esac
+done
 
 mkdir -p "$CA_DIR" "$PSQL_DIR" "$REDIS_DIR"
 
@@ -70,7 +84,24 @@ if command -v systemctl >/dev/null 2>&1; then
   systemctl enable --now docker >/dev/null 2>&1 || true
 fi
 
+if [[ "$RESET" == true ]]; then
+  docker compose \
+    --env-file "$ENV_FILE" \
+    -f "$COMPOSE_FILE" \
+    down -v --remove-orphans >/dev/null 2>&1 || true
+fi
+
 docker compose \
   --env-file "$ENV_FILE" \
   -f "$COMPOSE_FILE" \
-  up -d
+  up -d --wait --wait-timeout 120
+
+for _ in $(seq 1 60); do
+  if curl -fsS "http://127.0.0.1:18428/health" >/dev/null 2>&1; then
+    exit 0
+  fi
+  sleep 2
+done
+
+echo "error: victoria health check did not become ready"
+exit 1

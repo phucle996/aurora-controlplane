@@ -1,0 +1,9 @@
+DROP TABLE IF EXISTS core.workspace_members CASCADE;
+DROP TABLE IF EXISTS core.workspaces CASCADE;
+DROP TABLE IF EXISTS core.data_planes CASCADE;
+DROP TABLE IF EXISTS core.zones CASCADE;
+DROP TABLE IF EXISTS core.tenant_members CASCADE;
+DROP TABLE IF EXISTS core.tenants CASCADE;
+
+DROP FUNCTION IF EXISTS core.trigger_set_timestamp();
+DROP SCHEMA IF EXISTS core CASCADE;

@@ -29,9 +29,11 @@ type DeviceChallenge struct {
 
 // DeviceProof carries the device's signed response to a challenge.
 type DeviceProof struct {
-	ChallengeID string
-	DeviceID    string
-	Signature   string
+	ChallengeID  string
+	DeviceID     string
+	Signature    string
+	NewPublicKey string
+	NewAlgorithm string
 }
 
 // RefreshToken stores a revocable refresh token bound to a device.

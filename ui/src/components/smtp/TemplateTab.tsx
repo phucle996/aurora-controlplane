@@ -3,60 +3,16 @@
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { parseAPIError } from "@/components/auth/auth-utils";
 import ComponentCard from "@/components/common/ComponentCard";
+import {
+  deleteTemplate,
+  getTemplate,
+  listConsumerOptions,
+  listTemplates,
+  updateTemplate,
+} from "@/components/smtp/api";
+import { useSMTPWorkspace } from "@/components/smtp/SMTPWorkspaceProvider";
 import type { TemplateItem } from "@/components/smtp/types";
-
-type TemplateListResponse = {
-  items?: Array<{
-    id: string;
-    name: string;
-    category: string;
-    traffic_class: string;
-    subject: string;
-    from_email: string;
-    to_email: string;
-    status: string;
-    variables: string[];
-    consumer_id: string;
-    consumer_name: string;
-    text_body: string;
-    html_body: string;
-    active_version: number;
-    runtime_version: number;
-    created_at: string;
-    updated_at: string;
-  }>;
-};
-
-type TemplateSummaryItem = NonNullable<TemplateListResponse["items"]>[number];
-
-type TemplateDetailResponse = {
-  id: string;
-  name: string;
-  category: string;
-  traffic_class: string;
-  subject: string;
-  from_email: string;
-  to_email: string;
-  status: string;
-  variables: string[];
-  consumer_id: string;
-  consumer_name: string;
-  text_body: string;
-  html_body: string;
-  active_version: number;
-  runtime_version: number;
-  created_at: string;
-  updated_at: string;
-};
-
-type ConsumerListResponse = {
-  items?: Array<{
-    id: string;
-    name: string;
-  }>;
-};
 
 type TemplateFormState = {
   name: string;
@@ -91,6 +47,7 @@ export function TemplateTab({
   onSearchChange: (value: string) => void;
 }) {
   const router = useRouter();
+  const { workspace, workspaceID, isLoading: isWorkspaceLoading, error: workspaceError } = useSMTPWorkspace();
   const [templates, setTemplates] = useState<TemplateItem[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState("");
   const [selectedTemplate, setSelectedTemplate] = useState<TemplateItem | null>(null);
@@ -105,6 +62,16 @@ export function TemplateTab({
   const [detailError, setDetailError] = useState("");
 
   useEffect(() => {
+    if (workspaceID === "") {
+      setTemplates([]);
+      setConsumerOptions([]);
+      setSelectedTemplateId("");
+      setSelectedTemplate(null);
+      setForm(emptyTemplateForm());
+      setIsLoading(false);
+      return;
+    }
+
     let cancelled = false;
 
     async function loadData() {
@@ -112,33 +79,16 @@ export function TemplateTab({
       setError("");
 
       try {
-        const [templateResponse, consumerResponse] = await Promise.all([
-          fetch("/api/v1/smtp/templates", {
-            method: "GET",
-            cache: "no-store",
-          }),
-          fetch("/api/v1/smtp/consumers", {
-            method: "GET",
-            cache: "no-store",
-          }),
+        const [nextTemplates, nextConsumers] = await Promise.all([
+          listTemplates(workspaceID),
+          listConsumerOptions(workspaceID),
         ]);
-
-        if (!templateResponse.ok) {
-          throw new Error("Failed to load SMTP templates");
-        }
-        if (!consumerResponse.ok) {
-          throw new Error("Failed to load SMTP consumers");
-        }
-
-        const templateResult = (await templateResponse.json()) as TemplateListResponse;
-        const consumerResult = (await consumerResponse.json()) as ConsumerListResponse;
         if (cancelled) {
           return;
         }
 
-        const nextTemplates = (templateResult.items ?? []).map(mapTemplateResponse);
         setTemplates(nextTemplates);
-        setConsumerOptions(consumerResult.items ?? []);
+        setConsumerOptions(nextConsumers.map((consumer) => ({ id: consumer.id, name: consumer.label })));
 
         if (nextTemplates.length === 0) {
           setSelectedTemplateId("");
@@ -147,10 +97,11 @@ export function TemplateTab({
           return;
         }
 
-        const hasSelected = nextTemplates.some((template) => template.id === selectedTemplateId);
-        if (!hasSelected) {
-          setSelectedTemplateId(nextTemplates[0].id);
-        }
+        setSelectedTemplateId((current) =>
+          nextTemplates.some((template) => template.id === current)
+            ? current
+            : nextTemplates[0].id,
+        );
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load SMTP templates");
@@ -166,10 +117,10 @@ export function TemplateTab({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [workspaceID]);
 
   useEffect(() => {
-    if (selectedTemplateId === "") {
+    if (workspaceID === "" || selectedTemplateId === "") {
       setSelectedTemplate(null);
       setForm(emptyTemplateForm());
       setDetailError("");
@@ -184,28 +135,16 @@ export function TemplateTab({
       setDetailError("");
 
       try {
-        const detailResponse = await fetch(`/api/v1/smtp/templates/${selectedTemplateId}`, {
-          method: "GET",
-          cache: "no-store",
-        });
-        if (!detailResponse.ok) {
-          throw new Error("Failed to load SMTP template detail");
-        }
-
-        const result = (await detailResponse.json()) as TemplateDetailResponse;
+        const next = await getTemplate(workspaceID, selectedTemplateId);
         if (cancelled) {
           return;
         }
-
-        const next = mapTemplateResponse(result);
         setSelectedTemplate(next);
         setForm(templateToForm(next));
         setIsEditing(false);
       } catch (err) {
         if (!cancelled) {
-          setDetailError(
-            err instanceof Error ? err.message : "Failed to load SMTP template detail",
-          );
+          setDetailError(err instanceof Error ? err.message : "Failed to load SMTP template detail");
         }
       } finally {
         if (!cancelled) {
@@ -218,7 +157,7 @@ export function TemplateTab({
     return () => {
       cancelled = true;
     };
-  }, [selectedTemplateId]);
+  }, [selectedTemplateId, workspaceID]);
 
   const keyword = search.trim().toLowerCase();
   const filteredTemplates = useMemo(
@@ -258,7 +197,7 @@ export function TemplateTab({
   }
 
   async function handleSave() {
-    if (selectedTemplate == null) {
+    if (selectedTemplate == null || workspaceID === "") {
       return;
     }
 
@@ -266,36 +205,22 @@ export function TemplateTab({
     setDetailError("");
 
     try {
-      const response = await fetch(`/api/v1/smtp/templates/${selectedTemplate.id}`, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        credentials: "include",
-        body: JSON.stringify({
-          name: form.name.trim(),
-          category: form.category.trim(),
-          traffic_class: form.trafficClass.trim(),
-          subject: form.subject.trim(),
-          from_email: form.fromEmail.trim(),
-          to_email: form.toEmail.trim(),
-          status: form.status.trim(),
-          consumer_id: form.consumerID.trim(),
-          body: form.body,
-          variables: splitVariables(form.variablesText),
-        }),
+      const next = await updateTemplate(workspaceID, selectedTemplate.id, {
+        name: form.name.trim(),
+        category: form.category.trim(),
+        traffic_class: form.trafficClass.trim(),
+        subject: form.subject.trim(),
+        from_email: form.fromEmail.trim(),
+        to_email: form.toEmail.trim(),
+        status: form.status.trim(),
+        consumer_id: form.consumerID.trim(),
+        variables: splitVariables(form.variablesText),
+        text_body: form.body,
+        html_body: form.body.replaceAll("\n", "<br/>"),
       });
 
-      if (!response.ok) {
-        throw new Error(await parseAPIError(response));
-      }
-
-      const result = (await response.json()) as TemplateDetailResponse;
-      const next = mapTemplateResponse(result);
       setSelectedTemplate(next);
-      setTemplates((current) =>
-        current.map((item) => (item.id === next.id ? next : item)),
-      );
+      setTemplates((current) => current.map((item) => (item.id === next.id ? next : item)));
       setForm(templateToForm(next));
       setIsEditing(false);
     } catch (err) {
@@ -306,7 +231,7 @@ export function TemplateTab({
   }
 
   async function handleDelete() {
-    if (selectedTemplate == null) {
+    if (selectedTemplate == null || workspaceID === "") {
       return;
     }
     if (!window.confirm(`Delete template "${selectedTemplate.name}"?`)) {
@@ -317,14 +242,7 @@ export function TemplateTab({
     setDetailError("");
 
     try {
-      const response = await fetch(`/api/v1/smtp/templates/${selectedTemplate.id}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-      if (!response.ok) {
-        throw new Error(await parseAPIError(response));
-      }
-
+      await deleteTemplate(workspaceID, selectedTemplate.id);
       const deletedID = selectedTemplate.id;
       const nextTemplates = templates.filter((item) => item.id !== deletedID);
       setTemplates(nextTemplates);
@@ -337,6 +255,18 @@ export function TemplateTab({
     } finally {
       setIsDeleting(false);
     }
+  }
+
+  const workspaceQuery = workspaceID === "" ? "" : `?workspace=${workspaceID}`;
+
+  if (isWorkspaceLoading) {
+    return <Panel tone="neutral" message="Resolving workspace context..." />;
+  }
+  if (workspaceError !== "") {
+    return <Panel tone="error" message={workspaceError} />;
+  }
+  if (workspace == null) {
+    return <Panel tone="neutral" message="No workspace is available for SMTP yet." />;
   }
 
   return (
@@ -359,7 +289,7 @@ export function TemplateTab({
               </div>
               <button
                 type="button"
-                onClick={() => router.push("/smtp/templates/new")}
+                onClick={() => router.push(`/smtp/templates/new${workspaceQuery}`)}
                 className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-3 text-sm font-semibold text-white transition hover:bg-gray-800 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
               >
                 Add Template
@@ -367,19 +297,11 @@ export function TemplateTab({
             </div>
 
             {isLoading ? (
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-5 py-5 dark:border-gray-800 dark:bg-gray-900/40">
-                <p className="text-sm text-gray-500 dark:text-gray-400">Loading templates...</p>
-              </div>
+              <Panel tone="neutral" message="Loading templates..." />
             ) : error !== "" ? (
-              <div className="rounded-2xl border border-error-200 bg-error-50 px-5 py-5 dark:border-error-500/30 dark:bg-error-500/10">
-                <p className="text-sm text-error-700 dark:text-error-300">{error}</p>
-              </div>
+              <Panel tone="error" message={error} />
             ) : filteredTemplates.length === 0 ? (
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 px-5 py-5 dark:border-gray-800 dark:bg-gray-900/40">
-                <p className="text-sm text-gray-500 dark:text-gray-400">
-                  No template matches your search.
-                </p>
-              </div>
+              <Panel tone="neutral" message="No template matches your search." />
             ) : (
               filteredTemplates.map((template) => {
                 const active = selectedTemplateId === template.id;
@@ -399,12 +321,8 @@ export function TemplateTab({
                     >
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
-                          <h3 className="text-sm font-semibold text-gray-900 dark:text-white">
-                            {template.name}
-                          </h3>
-                          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                            {template.category}
-                          </p>
+                          <h3 className="text-sm font-semibold text-gray-900 dark:text-white">{template.name}</h3>
+                          <p className="mt-1 text-sm text-gray-500 dark:text-gray-400">{template.category}</p>
                         </div>
                         <span className="rounded-full bg-white px-2.5 py-1 text-[11px] font-semibold text-gray-700 shadow-theme-xs dark:bg-white/5 dark:text-gray-300">
                           {template.status}
@@ -442,19 +360,15 @@ export function TemplateTab({
           </div>
 
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 dark:border-gray-800 dark:bg-gray-900/40">
-            {isLoading ? (
-              <p className="text-sm text-gray-500 dark:text-gray-400">
-                Loading template detail...
-              </p>
+            {isLoading || isDetailLoading ? (
+              <p className="text-sm text-gray-500 dark:text-gray-400">Loading template detail...</p>
             ) : detailError !== "" ? (
               <p className="text-sm text-error-700 dark:text-error-300">{detailError}</p>
             ) : selectedTemplate != null ? (
               <div className="space-y-5">
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <p className="text-xs font-medium tracking-[0.2em] text-gray-400 uppercase">
-                      Template Detail
-                    </p>
+                    <p className="text-xs font-medium tracking-[0.2em] text-gray-400 uppercase">Template Detail</p>
                     <h3 className="mt-2 text-xl font-semibold text-gray-900 dark:text-white">
                       {selectedTemplate.name}
                     </h3>
@@ -472,50 +386,13 @@ export function TemplateTab({
                 </div>
 
                 <div className="grid gap-4 xl:grid-cols-2">
-                  <Field
-                    label="Template Name"
-                    value={form.name}
-                    onChange={(value) => updateForm("name", value)}
-                    readOnly={!isEditing}
-                  />
-                  <Field
-                    label="Category"
-                    value={form.category}
-                    onChange={(value) => updateForm("category", value)}
-                    readOnly={!isEditing}
-                  />
-                  <SelectField
-                    label="Traffic Class"
-                    value={form.trafficClass}
-                    onChange={(value) => updateForm("trafficClass", value)}
-                    options={trafficClassOptions}
-                    disabled={!isEditing}
-                  />
-                  <SelectField
-                    label="Status"
-                    value={form.status}
-                    onChange={(value) => updateForm("status", value)}
-                    options={statusOptions}
-                    disabled={!isEditing}
-                  />
-                  <Field
-                    label="Subject"
-                    value={form.subject}
-                    onChange={(value) => updateForm("subject", value)}
-                    readOnly={!isEditing}
-                  />
-                  <Field
-                    label="From"
-                    value={form.fromEmail}
-                    onChange={(value) => updateForm("fromEmail", value)}
-                    readOnly={!isEditing}
-                  />
-                  <Field
-                    label="To"
-                    value={form.toEmail}
-                    onChange={(value) => updateForm("toEmail", value)}
-                    readOnly={!isEditing}
-                  />
+                  <Field label="Template Name" value={form.name} onChange={(value) => updateForm("name", value)} readOnly={!isEditing} />
+                  <Field label="Category" value={form.category} onChange={(value) => updateForm("category", value)} readOnly={!isEditing} />
+                  <SelectField label="Traffic Class" value={form.trafficClass} onChange={(value) => updateForm("trafficClass", value)} options={trafficClassOptions} disabled={!isEditing} />
+                  <SelectField label="Status" value={form.status} onChange={(value) => updateForm("status", value)} options={statusOptions} disabled={!isEditing} />
+                  <Field label="Subject" value={form.subject} onChange={(value) => updateForm("subject", value)} readOnly={!isEditing} />
+                  <Field label="From" value={form.fromEmail} onChange={(value) => updateForm("fromEmail", value)} readOnly={!isEditing} />
+                  <Field label="To" value={form.toEmail} onChange={(value) => updateForm("toEmail", value)} readOnly={!isEditing} />
                   <SelectField
                     label="Consumer"
                     value={form.consumerID}
@@ -532,9 +409,7 @@ export function TemplateTab({
                 </div>
 
                 <div className="space-y-2">
-                  <p className="text-xs font-medium tracking-[0.18em] text-gray-400 uppercase">
-                    Body
-                  </p>
+                  <p className="text-xs font-medium tracking-[0.18em] text-gray-400 uppercase">Body</p>
                   <textarea
                     rows={14}
                     value={form.body}
@@ -656,27 +531,6 @@ function SelectField({
   );
 }
 
-function mapTemplateResponse(item: TemplateSummaryItem | TemplateDetailResponse): TemplateItem {
-  return {
-    id: item.id,
-    name: item.name,
-    category: item.category,
-    trafficClass: item.traffic_class || "transactional",
-    subject: item.subject,
-    from: item.from_email,
-    to: item.to_email,
-    status: item.status,
-    variables: item.variables ?? [],
-    consumerId: item.consumer_id || "",
-    consumer: item.consumer_name || "none",
-    body: item.text_body || item.html_body || "",
-    createdAt: item.created_at,
-    activeVersion: item.active_version,
-    runtimeVersion: item.runtime_version,
-    updatedAt: item.updated_at,
-  };
-}
-
 function templateToForm(template: TemplateItem): TemplateFormState {
   return {
     name: template.name,
@@ -687,7 +541,7 @@ function templateToForm(template: TemplateItem): TemplateFormState {
     subject: template.subject,
     fromEmail: template.from,
     toEmail: template.to,
-    body: template.body,
+    body: template.textBody || template.htmlBody,
     variablesText: template.variables.join(", "),
   };
 }
@@ -712,4 +566,19 @@ function splitVariables(value: string) {
     .split(",")
     .map((item) => item.trim())
     .filter((item) => item !== "");
+}
+
+function Panel({
+  tone,
+  message,
+}: {
+  tone: "neutral" | "error";
+  message: string;
+}) {
+  const className =
+    tone === "error"
+      ? "border-error-200 bg-error-50 text-error-700 dark:border-error-500/30 dark:bg-error-500/10 dark:text-error-300"
+      : "border-gray-200 bg-gray-50 text-gray-500 dark:border-gray-800 dark:bg-gray-900/40 dark:text-gray-400";
+
+  return <div className={`rounded-2xl border px-5 py-5 text-sm ${className}`}>{message}</div>;
 }

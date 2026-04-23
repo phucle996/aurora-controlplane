@@ -14,138 +14,243 @@ import (
 // Level matrix (lower number = higher privilege):
 //
 //	0   super-admin
-//	10  admin
-//	50  operator
-//	100 regular user (any authenticated)
-func (m *Module) RegisterRoutes(router *gin.RouterGroup, cfg *config.Config) {
-	access := middleware.Access(cfg.Security.AccessSecretKey, m.TokenService)
+//	1  admin global
+//	2  admin tenant
+//	3 	other roles special in the tenant : manager ,... .
+//
+// the admin can define level user in these tenant ( 3 and lower)
+//
+//	4 	 authenticate user global or user level default in the tenant
+//
+// (when user just join tenant)
+func RegisterRoutes(router *gin.Engine, cfg *config.Config, m *Module) {
 
-	auth := router.Group("/auth")
-	m.registerAuthRoutes(auth, access)
+	// ----------------------------
+	// Global authentication routes
+	// ----------------------------
 
-	// ── Self-service: device management (any authenticated user) ──────────────
-	meDevices := router.Group("/me/devices",
-		access,
-	)
-	{
-		meDevices.GET("", m.DeviceHandler.ListMyDevices)
-		meDevices.DELETE("/:id", m.DeviceHandler.RevokeDevice)
-		meDevices.DELETE("", m.DeviceHandler.RevokeOtherDevices)
-	}
-
-	// ── Admin: device management ──────────────
-	adminDevices := router.Group("/admin/devices",
-		access,
-		middleware.RequireLevel(50),
-		middleware.RequirePermission(m.RbacService, "admin:device:read"),
-	)
-	{
-		adminDevices.GET("/:id", m.DeviceHandler.AdminGetDevice)
-		adminDevices.DELETE("/:id",
-			middleware.RequirePermission(m.RbacService, "admin:device:revoke"),
-			m.DeviceHandler.AdminForceRevoke,
-		)
-		adminDevices.POST("/:id/suspicious",
-			middleware.RequirePermission(m.RbacService, "admin:device:quarantine"),
-			m.DeviceHandler.AdminMarkSuspicious,
-		)
-		adminDevices.POST("/cleanup",
-			middleware.RequirePermission(m.RbacService, "admin:device:cleanup"),
-			m.DeviceHandler.AdminCleanupStale,
-		)
-	}
-
-	// ── Admin: RBAC ──────────────
-	if m.RbacHandler != nil {
-		rbacAdmin := router.Group("/admin/rbac",
-			access,
-			middleware.RequireLevel(0), // Super admin
-		)
-		{
-			rbacAdmin.GET("/roles", middleware.RequirePermission(m.RbacService, "rbac:role:read"), m.RbacHandler.ListRoles)
-			rbacAdmin.POST("/roles", middleware.RequirePermission(m.RbacService, "rbac:role:create"), m.RbacHandler.CreateRole)
-			rbacAdmin.GET("/roles/:id", middleware.RequirePermission(m.RbacService, "rbac:role:read"), m.RbacHandler.GetRole)
-			rbacAdmin.PUT("/roles/:id", middleware.RequirePermission(m.RbacService, "rbac:role:update"), m.RbacHandler.UpdateRole)
-			rbacAdmin.DELETE("/roles/:id", middleware.RequirePermission(m.RbacService, "rbac:role:delete"), m.RbacHandler.DeleteRole)
-
-			rbacAdmin.GET("/permissions", middleware.RequirePermission(m.RbacService, "rbac:permission:read"), m.RbacHandler.ListPermissions)
-			rbacAdmin.POST("/permissions", middleware.RequirePermission(m.RbacService, "rbac:permission:create"), m.RbacHandler.CreatePermission)
-
-			rbacAdmin.POST("/roles/:id/permissions", middleware.RequirePermission(m.RbacService, "rbac:permission:assign"), m.RbacHandler.AssignPermission)
-			rbacAdmin.DELETE("/roles/:id/permissions/:perm_id", middleware.RequirePermission(m.RbacService, "rbac:permission:revoke"), m.RbacHandler.RevokePermission)
-
-			rbacAdmin.POST("/cache/invalidate", middleware.RequirePermission(m.RbacService, "rbac:cache:flush"), m.RbacHandler.InvalidateAll)
-		}
-	}
-
-	// ── MFA: public challenge flows (no token — in-flight login) ─────────────
-	if m.MfaHandler != nil {
-		mfaPublic := router.Group("/auth/mfa")
-		{
-			mfaPublic.POST("/verify",
-				middleware.RateLimit(m.RateLimiter, "mfa_verify", 5, 3, time.Minute),
-				m.MfaHandler.Verify,
-			)
-
-		}
-
-		// ── MFA: self-service management (any authenticated user) ─────────────
-		mfaMe := router.Group("/me/mfa",
-			access,
-		)
-		{
-			mfaMe.GET("", m.MfaHandler.ListMethods)
-			mfaMe.POST("/totp/enroll",
-				middleware.RateLimit(m.RateLimiter, "mfa_enroll", 3, 5, time.Minute),
-				m.MfaHandler.EnrollTOTP,
-			)
-			mfaMe.POST("/totp/confirm",
-				middleware.RateLimit(m.RateLimiter, "mfa_confirm", 5, 5, time.Minute),
-				m.MfaHandler.ConfirmTOTP,
-			)
-			mfaMe.PATCH("/:setting_id/enable", m.MfaHandler.EnableMethod)
-			mfaMe.PATCH("/:setting_id/disable", m.MfaHandler.DisableMethod)
-			mfaMe.DELETE("/:setting_id", m.MfaHandler.DeleteMethod)
-			mfaMe.POST("/recovery-codes", m.MfaHandler.GenerateRecoveryCodes)
-		}
-	}
-}
-
-// ── Auth routes (public & protected) ──────────────────────────────────────────
-func (m *Module) registerAuthRoutes(router *gin.RouterGroup, access gin.HandlerFunc) {
-
+	// đăng kí tài khoản global (không thuộc tenant nào)
 	router.POST(
-		"/register",
+		"/api/v1/auth/register",
 		middleware.RateLimit(m.RateLimiter, "auth_register", 5, 5, time.Minute),
 		m.AuthHandler.Register,
 	)
-	router.GET("/activate",
-		middleware.RateLimit(m.RateLimiter, "auth_activate", 5, 5, time.Minute),
-		m.AuthHandler.Activate)
 
+	// kích hoạt tài khoản global (không thuộc tenant nào)
+	router.GET("/api/v1/auth/activate",
+		middleware.RateLimit(m.RateLimiter, "auth_activate", 5, 5, time.Minute),
+		m.AuthHandler.Activate,
+	)
+
+	// đăng nhập tài khoản global (không thuộc tenant nào)
 	router.POST(
-		"/login",
+		"/api/v1/auth/login",
 		middleware.RateLimit(m.RateLimiter, "auth_login", 5, 5, time.Minute),
 		m.AuthHandler.Login,
 	)
+
+	// admin login bằng static admin api key, set cookie `apitoken`.
 	router.POST(
-		"/forgot-password",
+		"/admin/auth/login",
+		middleware.RateLimit(m.RateLimiter, "auth_admin_api_key_login", 5, 5, time.Minute),
+		m.AuthHandler.AdminLogin,
+	)
+
+	// quên mật khẩu tài khoản global (không thuộc tenant nào)
+	router.POST(
+		"/api/v1/auth/forgot-password",
 		middleware.RateLimit(m.RateLimiter, "auth_forgot_password", 3, 5, time.Minute),
 		m.AuthHandler.ForgotPassword,
 	)
+
+	// reset mật khẩu tài khoản global (không thuộc tenant nào)
 	router.POST(
-		"/reset-password",
+		"/api/v1/auth/reset-password",
 		middleware.RateLimit(m.RateLimiter, "auth_reset_password", 5, 5, time.Minute),
 		m.AuthHandler.ResetPassword,
 	)
 
 	// Token rotation — requires device signature; rate-limited to 10 req/min per key.
 	router.POST(
-		"/refresh",
+		"/api/v1/auth/refresh",
 		middleware.RateLimit(m.RateLimiter, "auth_refresh", 10, 10, time.Minute),
 		m.TokenHandler.Refresh,
 	)
 
 	// Logout — requires valid or near-expired access token to blacklist it.
-	router.POST("/logout", access, m.AuthHandler.Logout)
+	router.POST("/api/v1/auth/logout",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		m.AuthHandler.Logout,
+	)
+
+	router.GET("/api/v1/whoami",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		m.AuthHandler.WhoAmI,
+	)
+
+	// ----------------------------
+	// Device management
+	// ----------------------------
+
+	// Self-service: device management (any authenticated user)
+	router.GET("/api/v1/me/devices",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		m.DeviceHandler.ListMyDevices,
+	)
+
+	// delete device self
+	router.DELETE("/api/v1/me/devices/:id",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		m.DeviceHandler.RevokeDevice,
+	)
+
+	// revoke another device , keep device current
+	router.DELETE("/api/v1/me/devices/others",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		m.DeviceHandler.RevokeOtherDevices,
+	)
+
+	// Admin: device management
+	router.GET("/admin/devices/:id",
+		middleware.AdminAPIToken(),
+		m.DeviceHandler.AdminGetDevice,
+	)
+
+	router.DELETE("/admin/devices/:id",
+		middleware.AdminAPIToken(),
+		m.DeviceHandler.AdminForceRevoke,
+	)
+
+	router.GET("/admin/devices/:id/quarantine",
+		middleware.AdminAPIToken(),
+		m.DeviceHandler.Quarantine,
+	)
+	router.POST("/admin/devices/:id/suspicious",
+		middleware.AdminAPIToken(),
+		m.DeviceHandler.AdminMarkSuspicious,
+	)
+
+	router.POST("/admin/devices/cleanup",
+		middleware.AdminAPIToken(),
+		m.DeviceHandler.AdminCleanupStale,
+	)
+
+	// ── Admin: RBAC ──────────────
+
+	router.GET("/admin/rbac/roles",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.ListRoles,
+	)
+
+	router.POST("/admin/rbac/roles",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.CreateRole,
+	)
+	router.GET("/admin/rbac/roles/:id",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.GetRole,
+	)
+
+	router.PUT("/admin/rbac/roles/:id",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.UpdateRole,
+	)
+
+	router.DELETE("/admin/rbac/roles/:id",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.DeleteRole,
+	)
+
+	router.GET("/admin/rbac/permissions",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.ListPermissions,
+	)
+
+	router.POST("/admin/rbac/permissions",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.CreatePermission,
+	)
+
+	router.POST("/admin/rbac/roles/:id/permissions",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.AssignPermission,
+	)
+
+	router.DELETE("/admin/rbac/roles/:id/permissions/:perm_id",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.RevokePermission,
+	)
+
+	router.POST("/admin/rbac/cache/invalidate",
+		middleware.AdminAPIToken(),
+		m.RbacHandler.InvalidateAll,
+	)
+
+	// MFA: public challenge flows (no token — in-flight login)
+	router.POST("/api/v1/auth/mfa/verify",
+		middleware.RateLimit(m.RateLimiter, "mfa_verify", 5, 1, time.Minute),
+		m.MfaHandler.Verify,
+	)
+
+	// MFA: self-service management (any authenticated user)
+	router.GET("/api/v1/me/mfa",
+		middleware.RateLimit(m.RateLimiter, "mfa_list", 3, 1, time.Minute),
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		m.MfaHandler.ListMethods,
+	)
+
+	// otp enroll
+	router.POST("/api/v1/me/mfa/totp/enroll",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		middleware.RateLimit(m.RateLimiter, "mfa_enroll", 10, 1, time.Minute),
+		m.MfaHandler.EnrollTOTP,
+	)
+
+	// otp confirm
+	router.POST("/api/v1/me/mfa/totp/confirm",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		middleware.RateLimit(m.RateLimiter, "mfa_confirm", 10, 1, time.Minute),
+		m.MfaHandler.ConfirmTOTP,
+	)
+
+	// otp enable
+	router.PATCH("/api/v1/me/mfa/:setting_id/enable",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		middleware.RateLimit(m.RateLimiter, "mfa_enable", 10, 1, time.Minute),
+		m.MfaHandler.EnableMethod,
+	)
+
+	// otp disable
+	router.PATCH("/api/v1/me/mfa/:setting_id/disable",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		middleware.RateLimit(m.RateLimiter, "mfa_disable", 10, 1, time.Minute),
+		m.MfaHandler.DisableMethod,
+	)
+
+	// otp delete
+	router.DELETE("/api/v1/me/mfa/:setting_id",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		middleware.RateLimit(m.RateLimiter, "mfa_delete", 10, 1, time.Minute),
+		m.MfaHandler.DeleteMethod,
+	)
+
+	// otp generate recovery codes
+	router.POST("/api/v1/me/mfa/recovery-codes",
+		middleware.Access(),
+		middleware.RequireDeviceID(),
+		middleware.RateLimit(m.RateLimiter, "mfa_recovery_codes", 10, 1, time.Minute),
+		m.MfaHandler.GenerateRecoveryCodes,
+	)
+
 }

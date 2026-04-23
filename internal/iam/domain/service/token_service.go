@@ -30,8 +30,8 @@ type TokenResult struct {
 //
 // Flow 2 — Rotate (client-signed proof):
 //
-//	Client sends the raw refresh token plus an Ed25519/ECDSA signature
-//	over the canonical signing payload.
+//	Client sends an Ed25519/ECDSA signature over the canonical signing payload
+//	together with the refresh-token and device-id cookies.
 //	Server verifies the signature against the device's stored public key,
 //	then rotates: old token revoked → new refresh + new access token issued.
 type TokenService interface {
@@ -47,14 +47,17 @@ type TokenService interface {
 	// refresh token, and issues a fresh token pair.
 	Rotate(ctx context.Context, req *RotateRequest) (*TokenResult, error)
 
-	// IsBlacklisted checks if the given access token JTI is in the redis blacklist.
-	IsBlacklisted(ctx context.Context, jti string) bool
-
 	// RevokeByRaw hashes the raw refresh token and revokes it in the repository.
 	// Used primarily for Logout.
 	RevokeByRaw(ctx context.Context, rawRefreshToken string) error
-}
 
+	// RevokeAllByUser revokes every refresh token issued to a user.
+	// Used after password reset to force re-authentication everywhere.
+	RevokeAllByUser(ctx context.Context, userID string) error
+
+	// CleanupExpired removes expired refresh tokens from storage.
+	CleanupExpired(ctx context.Context) (int64, error)
+}
 
 // RotateRequest carries all data needed to perform a token rotation.
 type RotateRequest struct {
@@ -62,10 +65,16 @@ type RotateRequest struct {
 	RawRefreshToken string
 	// DeviceID identifies the device making the request.
 	DeviceID string
-	// Nonce is a random string chosen by the client to prevent replay attacks.
-	Nonce string
-	// TimestampUnix is the Unix epoch seconds at which the client signed.
-	TimestampUnix int64
+	// JTI is the proof identifier used for replay detection.
+	JTI string
+	// IssuedAt is the Unix epoch seconds at which the client signed.
+	IssuedAt int64
+	// HTM is the HTTP method that was signed.
+	HTM string
+	// HTU is the absolute refresh endpoint URL that was signed.
+	HTU string
+	// TokenHash is the SHA-256 hash of the refresh cookie exposed to JS.
+	TokenHash string
 	// Signature is the base64-raw-url encoded signature over the canonical payload.
 	Signature string
 }

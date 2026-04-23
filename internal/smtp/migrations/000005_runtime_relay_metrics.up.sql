@@ -1,0 +1,21 @@
+ALTER TABLE smtp.consumer_assignments
+  ADD COLUMN IF NOT EXISTS target_gateway_id VARCHAR(26),
+  ADD COLUMN IF NOT EXISTS target_gateway_shard_id INT,
+  ADD COLUMN IF NOT EXISTS target_gateway_data_plane_id VARCHAR(26),
+  ADD COLUMN IF NOT EXISTS target_gateway_grpc_endpoint TEXT NOT NULL DEFAULT '';
+
+ALTER TABLE smtp.gateway_runtime_statuses
+  ADD COLUMN IF NOT EXISTS desired_workers INT NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS active_workers INT NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS relay_queue_depth BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS pool_open_conns INT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS pool_busy_conns INT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS send_rate_per_second DOUBLE PRECISION NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS backpressure_state TEXT NOT NULL DEFAULT 'normal';
+
+ALTER TABLE smtp.consumer_runtime_statuses
+  ADD COLUMN IF NOT EXISTS broker_lag BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS oldest_unacked_age_ms BIGINT NOT NULL DEFAULT 0,
+  ADD COLUMN IF NOT EXISTS desired_workers INT NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS active_workers INT NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS relay_queue_depth BIGINT NOT NULL DEFAULT 0;

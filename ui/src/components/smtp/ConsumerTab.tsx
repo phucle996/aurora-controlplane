@@ -3,33 +3,9 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import ComponentCard from "@/components/common/ComponentCard";
+import { getConsumer, listConsumers } from "@/components/smtp/api";
+import { useSMTPWorkspace } from "@/components/smtp/SMTPWorkspaceProvider";
 import type { ConsumerItem } from "@/components/smtp/types";
-
-type ConsumerListResponse = {
-  items?: Array<{
-    id: string;
-    name: string;
-    transport_type: string;
-    source: string;
-    consumer_group: string;
-    status: string;
-    note: string;
-    created_at: string;
-    updated_at: string;
-  }>;
-};
-
-type ConsumerDetailResponse = {
-  id: string;
-  name: string;
-  transport_type: string;
-  source: string;
-  consumer_group: string;
-  status: string;
-  note: string;
-  created_at: string;
-  updated_at: string;
-};
 
 export function ConsumerTab({
   search,
@@ -38,6 +14,7 @@ export function ConsumerTab({
   search: string;
   onSearchChange: (value: string) => void;
 }) {
+  const { workspace, workspaceID, isLoading: isWorkspaceLoading, error: workspaceError } = useSMTPWorkspace();
   const [consumers, setConsumers] = useState<ConsumerItem[]>([]);
   const [selectedConsumerID, setSelectedConsumerID] = useState("");
   const [selectedConsumer, setSelectedConsumer] = useState<ConsumerItem | null>(null);
@@ -47,6 +24,15 @@ export function ConsumerTab({
   const [detailError, setDetailError] = useState("");
 
   useEffect(() => {
+    if (workspaceID === "") {
+      setConsumers([]);
+      setSelectedConsumerID("");
+      setSelectedConsumer(null);
+      setIsLoading(false);
+      setError("");
+      return;
+    }
+
     let cancelled = false;
 
     async function loadConsumers() {
@@ -54,20 +40,11 @@ export function ConsumerTab({
       setError("");
 
       try {
-        const response = await fetch("/api/v1/smtp/consumers", {
-          method: "GET",
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error("Failed to load SMTP consumers");
-        }
-
-        const result = (await response.json()) as ConsumerListResponse;
+        const items = await listConsumers(workspaceID);
         if (cancelled) {
           return;
         }
 
-        const items = (result.items ?? []).map(mapConsumerResponse);
         setConsumers(items);
         if (items.length === 0) {
           setSelectedConsumerID("");
@@ -75,11 +52,9 @@ export function ConsumerTab({
           return;
         }
 
-        const hasSelected = items.some((item) => item.id === selectedConsumerID);
-        if (!hasSelected && selectedConsumerID !== "") {
-          setSelectedConsumerID("");
-          setSelectedConsumer(null);
-        }
+        setSelectedConsumerID((current) =>
+          items.some((item) => item.id === current) ? current : items[0].id,
+        );
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load SMTP consumers");
@@ -95,7 +70,7 @@ export function ConsumerTab({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [workspaceID]);
 
   useEffect(() => {
     if (selectedConsumerID === "") {
@@ -111,19 +86,11 @@ export function ConsumerTab({
       setDetailError("");
 
       try {
-        const response = await fetch(`/api/v1/smtp/consumers/${selectedConsumerID}`, {
-          method: "GET",
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error("Failed to load SMTP consumer detail");
-        }
-
-        const result = (await response.json()) as ConsumerDetailResponse;
+        const result = await getConsumer(workspaceID, selectedConsumerID);
         if (cancelled) {
           return;
         }
-        setSelectedConsumer(mapConsumerResponse(result));
+        setSelectedConsumer(result);
       } catch (err) {
         if (!cancelled) {
           setDetailError(
@@ -141,7 +108,7 @@ export function ConsumerTab({
     return () => {
       cancelled = true;
     };
-  }, [selectedConsumerID]);
+  }, [selectedConsumerID, workspaceID]);
 
   const keyword = search.trim().toLowerCase();
   const filteredConsumers = useMemo(
@@ -153,22 +120,36 @@ export function ConsumerTab({
 
         return (
           consumer.name.toLowerCase().includes(keyword) ||
-          consumer.stream.toLowerCase().includes(keyword) ||
+          consumer.source.toLowerCase().includes(keyword) ||
           consumer.status.toLowerCase().includes(keyword) ||
-          consumer.detail.toLowerCase().includes(keyword)
+          consumer.note.toLowerCase().includes(keyword)
         );
       }),
     [consumers, keyword],
   );
 
+  const workspaceQuery = workspaceID === "" ? "" : `?workspace=${workspaceID}`;
+
+  if (isWorkspaceLoading) {
+    return <StatePanel message="Resolving workspace context..." />;
+  }
+
+  if (workspaceError !== "") {
+    return <ErrorPanel message={workspaceError} />;
+  }
+
+  if (workspace == null) {
+    return <StatePanel message="No workspace is available for SMTP yet." />;
+  }
+
   return (
     <div className="space-y-6">
       <ComponentCard
-        title="Consumer Lanes"
+        title="Consumers"
         desc="Track SMTP consumers by status, transport, source stream, and consumer group."
         headerAction={
           <Link
-            href="/smtp/consumers/new"
+            href={`/smtp/consumers/new${workspaceQuery}`}
             className="inline-flex items-center rounded-xl bg-gray-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-gray-800 dark:bg-white dark:text-gray-900 dark:hover:bg-gray-200"
           >
             New Consumer
@@ -231,7 +212,7 @@ export function ConsumerTab({
                                 {consumer.name}
                               </p>
                               <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                                {consumer.detail || "No note"}
+                                {consumer.note || "No note"}
                               </p>
                             </div>
                           </td>
@@ -244,7 +225,7 @@ export function ConsumerTab({
                             {consumer.transportType ?? "-"}
                           </td>
                           <td className="px-5 py-4 text-sm text-gray-700 dark:text-gray-200">
-                            <span className="break-all">{consumer.stream || "-"}</span>
+                            <span className="break-all">{consumer.source || "-"}</span>
                           </td>
                           <td className="px-5 py-4 text-sm text-gray-700 dark:text-gray-200">
                             {consumer.consumerGroup || "-"}
@@ -358,11 +339,16 @@ function ConsumerDrawer({
             <>
               <DrawerInfo
                 label="Note"
-                value={consumer?.detail ?? "Select a consumer from the list to inspect it."}
+                value={consumer?.note ?? "Select a consumer from the list to inspect it."}
               />
-              <DrawerInfo label="Source" value={consumer?.stream ?? "-"} />
+              <DrawerInfo label="Source" value={consumer?.source ?? "-"} />
               <DrawerInfo label="Transport" value={consumer?.transportType ?? "-"} />
               <DrawerInfo label="Consumer group" value={consumer?.consumerGroup ?? "-"} />
+              <DrawerInfo label="Zone" value={consumer?.zoneId ?? "-"} />
+              <DrawerInfo
+                label="Batch / worker"
+                value={`${consumer?.batchSize ?? 0} batch, ${consumer?.workerConcurrency ?? 0} worker(s)`}
+              />
               <DrawerInfo label="Status" value={consumer?.status ?? "-"} />
               <DrawerInfo label="Consumer ID" value={consumer?.id ?? "-"} />
               <DrawerInfo
@@ -394,20 +380,20 @@ function DrawerInfo({ label, value }: { label: string; value: string }) {
   );
 }
 
-function mapConsumerResponse(
-  item: NonNullable<ConsumerListResponse["items"]>[number] | ConsumerDetailResponse,
-): ConsumerItem {
-  return {
-    id: item.id,
-    name: item.name,
-    stream: item.source,
-    status: item.status,
-    detail: item.note,
-    transportType: item.transport_type,
-    consumerGroup: item.consumer_group,
-    createdAt: item.created_at,
-    updatedAt: item.updated_at,
-  };
+function StatePanel({ message }: { message: string }) {
+  return (
+    <div className="rounded-2xl border border-gray-200 bg-gray-50 px-5 py-5 dark:border-gray-800 dark:bg-gray-900/40">
+      <p className="text-sm text-gray-500 dark:text-gray-400">{message}</p>
+    </div>
+  );
+}
+
+function ErrorPanel({ message }: { message: string }) {
+  return (
+    <div className="rounded-2xl border border-error-200 bg-error-50 px-5 py-5 dark:border-error-500/30 dark:bg-error-500/10">
+      <p className="text-sm text-error-700 dark:text-error-300">{message}</p>
+    </div>
+  );
 }
 
 function formatDateTime(value?: string) {

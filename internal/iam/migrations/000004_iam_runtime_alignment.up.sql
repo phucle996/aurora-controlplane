@@ -16,17 +16,26 @@ FOR EACH ROW
 EXECUTE FUNCTION iam.trigger_set_timestamp();
 
 ALTER TABLE iam.permissions
-	ADD COLUMN IF NOT EXISTS name VARCHAR(100);
+	ADD COLUMN IF NOT EXISTS name VARCHAR(100) NOT NULL DEFAULT '';
 
 UPDATE iam.permissions
 SET name = slug
 WHERE name IS NULL OR BTRIM(name) = '';
 
-ALTER TABLE iam.permissions
-	ALTER COLUMN name SET NOT NULL;
-
-ALTER TABLE iam.permissions
-	ALTER COLUMN slug DROP NOT NULL;
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM information_schema.columns
+		WHERE table_schema = 'iam'
+		  AND table_name = 'permissions'
+		  AND column_name = 'slug'
+		  AND is_nullable = 'NO'
+	) THEN
+		ALTER TABLE iam.permissions
+			ALTER COLUMN slug DROP NOT NULL;
+	END IF;
+END $$;
 
 DO $$
 BEGIN

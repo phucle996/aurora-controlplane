@@ -101,6 +101,31 @@ func (r *TokenRepository) Revoke(ctx context.Context, tokenID string) error {
 	return nil
 }
 
+// ConsumeActive marks exactly one active token as revoked.
+// It returns true only when a row matched:
+//   - id = tokenID
+//   - is_revoked = false
+//   - expires_at > NOW()
+func (r *TokenRepository) ConsumeActive(ctx context.Context, tokenID string) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, nil
+	}
+
+	tag, err := r.db.Exec(ctx, `
+		UPDATE iam.refresh_tokens
+		SET is_revoked = true
+		WHERE id = $1
+		  AND is_revoked = false
+		  AND expires_at > NOW()`,
+		tokenID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("token repo: consume active: %w", err)
+	}
+
+	return tag.RowsAffected() == 1, nil
+}
+
 // RevokeAllByDevice revokes every token bound to a given device.
 func (r *TokenRepository) RevokeAllByDevice(ctx context.Context, deviceID string) error {
 	if r == nil || r.db == nil {
@@ -147,6 +172,35 @@ func (r *TokenRepository) DeleteExpired(ctx context.Context) (int64, error) {
 	)
 	if err != nil {
 		return 0, fmt.Errorf("token repo: delete expired: %w", err)
+	}
+
+	return tag.RowsAffected(), nil
+}
+
+// DeleteExpiredBatch removes expired rows in bounded chunks to avoid large spikes.
+func (r *TokenRepository) DeleteExpiredBatch(ctx context.Context, limit int64) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	if limit <= 0 {
+		return 0, nil
+	}
+
+	tag, err := r.db.Exec(ctx, `
+		WITH doomed AS (
+			SELECT id
+			FROM iam.refresh_tokens
+			WHERE expires_at < NOW()
+			ORDER BY expires_at ASC
+			LIMIT $1
+		)
+		DELETE FROM iam.refresh_tokens t
+		USING doomed
+		WHERE t.id = doomed.id`,
+		limit,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("token repo: delete expired batch: %w", err)
 	}
 
 	return tag.RowsAffected(), nil

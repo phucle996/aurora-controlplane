@@ -1,4 +1,4 @@
-package service
+package iam_service
 
 import (
 	"context"
@@ -7,7 +7,6 @@ import (
 	"controlplane/internal/http/middleware"
 	"controlplane/internal/iam/domain/entity"
 	iam_domainrepo "controlplane/internal/iam/domain/repository"
-	iam_errorx "controlplane/internal/iam/errorx"
 )
 
 // RbacService implements iam_domainsvc.RbacService.
@@ -19,56 +18,61 @@ import (
 type RbacService struct {
 	repo     iam_domainrepo.RbacRepository
 	registry *middleware.RoleRegistry
+	bus      RbacCacheBus
 }
 
-func NewRbacService(repo iam_domainrepo.RbacRepository, registry *middleware.RoleRegistry) *RbacService {
-	return &RbacService{repo: repo, registry: registry}
+func NewRbacService(repo iam_domainrepo.RbacRepository, registry *middleware.RoleRegistry, bus RbacCacheBus) *RbacService {
+	return &RbacService{repo: repo, registry: registry, bus: bus}
 }
 
 // ── RoleResolver ──────────────────────────────────────────────────────────────
 
-// GetRoleEntry resolves role name → RoleEntry, implementing middleware.RoleResolver.
-func (s *RbacService) GetRoleEntry(ctx context.Context, role string) (middleware.RoleEntry, error) {
-	// 1. In-memory hit.
-	if entry, ok := s.registry.Get(role); ok {
-		return entry, nil
-	}
-
-	// 2. Miss — load from DB.
+// LoadRole fetches role metadata from DB, used by middleware.GetRoleEntry on cache miss.
+func (s *RbacService) LoadRole(ctx context.Context, role string) (middleware.RoleEntry, error) {
 	rp, err := s.repo.GetRoleByName(ctx, role)
 	if err != nil {
-		return middleware.RoleEntry{}, fmt.Errorf("rbac svc: resolve %q: %w", role, err)
+		return middleware.RoleEntry{}, fmt.Errorf("rbac svc: load %q: %w", role, err)
 	}
 
-	// 3. Cache with default TTL (15 min).
-	entry := middleware.RoleEntry{
+	return middleware.RoleEntry{
 		Level:       rp.Role.Level,
 		Permissions: rp.Permissions,
-	}
-	s.registry.Set(role, entry)
-	return entry, nil
+	}, nil
 }
 
 // InvalidateRole evicts one role so the next request refetches.
-func (s *RbacService) InvalidateRole(role string) { s.registry.Invalidate(role) }
+func (s *RbacService) InvalidateRole(ctx context.Context, role string) {
+	if s.registry != nil {
+		s.registry.Invalidate(role)
+	}
+	if s.bus != nil {
+		_ = s.bus.PublishInvalidateRole(ctx, role)
+	}
+}
 
 // InvalidateAll clears the entire cache.
-func (s *RbacService) InvalidateAll() { s.registry.InvalidateAll() }
+func (s *RbacService) InvalidateAll(ctx context.Context) {
+	if s.registry != nil {
+		s.registry.InvalidateAll()
+	}
+	if s.bus != nil {
+		_ = s.bus.PublishInvalidateAll(ctx)
+	}
+}
 
 // WarmUp preloads all roles at startup to avoid cold cache on first requests.
 func (s *RbacService) WarmUp(ctx context.Context) error {
-	roles, err := s.repo.ListRoles(ctx)
+	roles, err := s.repo.ListRoleEntries(ctx)
 	if err != nil {
 		return fmt.Errorf("rbac svc: warm-up: %w", err)
 	}
-	for _, r := range roles {
-		rp, err := s.repo.GetRoleByName(ctx, r.Name)
-		if err != nil {
-			return fmt.Errorf("rbac svc: warm-up %q: %w", r.Name, err)
+	for _, roleEntry := range roles {
+		if roleEntry == nil || roleEntry.Role == nil {
+			continue
 		}
-		s.registry.Set(r.Name, middleware.RoleEntry{
-			Level:       rp.Role.Level,
-			Permissions: rp.Permissions,
+		s.registry.Set(roleEntry.Role.Name, middleware.RoleEntry{
+			Level:       roleEntry.Role.Level,
+			Permissions: roleEntry.Permissions,
 		})
 	}
 	return nil
@@ -89,7 +93,11 @@ func (s *RbacService) GetRole(ctx context.Context, id string) (*entity.RoleWithP
 }
 
 func (s *RbacService) CreateRole(ctx context.Context, role *entity.Role) error {
-	return s.repo.CreateRole(ctx, role)
+	if err := s.repo.CreateRole(ctx, role); err != nil {
+		return err
+	}
+	s.InvalidateAll(ctx)
+	return nil
 }
 
 // UpdateRole persists changes and invalidates the old + new role name from cache.
@@ -101,9 +109,9 @@ func (s *RbacService) UpdateRole(ctx context.Context, role *entity.Role) error {
 	if err := s.repo.UpdateRole(ctx, role); err != nil {
 		return err
 	}
-	s.registry.Invalidate(old.Name)
+	s.InvalidateRole(ctx, old.Name)
 	if role.Name != old.Name {
-		s.registry.Invalidate(role.Name)
+		s.InvalidateRole(ctx, role.Name)
 	}
 	return nil
 }
@@ -117,7 +125,7 @@ func (s *RbacService) DeleteRole(ctx context.Context, id string) error {
 	if err := s.repo.DeleteRole(ctx, id); err != nil {
 		return err
 	}
-	s.registry.Invalidate(role.Name)
+	s.InvalidateRole(ctx, role.Name)
 	return nil
 }
 
@@ -137,7 +145,7 @@ func (s *RbacService) AssignPermission(ctx context.Context, roleID, permID strin
 		return err
 	}
 	if role, err := s.repo.GetRoleByID(ctx, roleID); err == nil {
-		s.registry.Invalidate(role.Name)
+		s.InvalidateRole(ctx, role.Name)
 	}
 	return nil
 }
@@ -148,10 +156,7 @@ func (s *RbacService) RevokePermission(ctx context.Context, roleID, permID strin
 		return err
 	}
 	if role, err := s.repo.GetRoleByID(ctx, roleID); err == nil {
-		s.registry.Invalidate(role.Name)
+		s.InvalidateRole(ctx, role.Name)
 	}
 	return nil
 }
-
-// keep import used
-var _ = iam_errorx.ErrRoleNotFound

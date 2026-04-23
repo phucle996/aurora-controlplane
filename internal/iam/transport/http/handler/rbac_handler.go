@@ -28,7 +28,14 @@ func NewRbacHandler(svc iam_domainsvc.RbacService) *RbacHandler {
 
 // ── Roles ─────────────────────────────────────────────────────────────────────
 
-// ListRoles GET /admin/rbac/roles
+// @Router /api/v1/admin/rbac/roles [get]
+// @Tags RBAC
+// @Summary List roles
+// @Description List roles
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) ListRoles(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -43,7 +50,14 @@ func (h *RbacHandler) ListRoles(c *gin.Context) {
 	response.RespondSuccess(c, roles, "ok")
 }
 
-// GetRole GET /admin/rbac/roles/:id
+// @Router /api/v1/admin/rbac/roles/:id [get]
+// @Tags RBAC
+// @Summary Get role
+// @Description Get role
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) GetRole(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -58,7 +72,15 @@ func (h *RbacHandler) GetRole(c *gin.Context) {
 	response.RespondSuccess(c, rp, "ok")
 }
 
-// CreateRole POST /admin/rbac/roles
+// @Router /api/v1/admin/rbac/roles [post]
+// @Tags RBAC
+// @Summary Create role
+// @Description Create role
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) CreateRole(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -84,7 +106,15 @@ func (h *RbacHandler) CreateRole(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"role": role, "message": "role created"})
 }
 
-// UpdateRole PATCH /admin/rbac/roles/:id
+// @Router /api/v1/admin/rbac/roles/:id [patch]
+// @Tags RBAC
+// @Summary Update role
+// @Description Update role
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) UpdateRole(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -110,7 +140,14 @@ func (h *RbacHandler) UpdateRole(c *gin.Context) {
 	response.RespondSuccess(c, nil, "role updated — cache invalidated")
 }
 
-// DeleteRole DELETE /admin/rbac/roles/:id
+// @Router /api/v1/admin/rbac/roles/:id [delete]
+// @Tags RBAC
+// @Summary Delete role
+// @Description Delete role
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) DeleteRole(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -126,7 +163,14 @@ func (h *RbacHandler) DeleteRole(c *gin.Context) {
 
 // ── Permissions ───────────────────────────────────────────────────────────────
 
-// ListPermissions GET /admin/rbac/permissions
+// @Router /api/v1/admin/rbac/permissions [get]
+// @Tags RBAC
+// @Summary List permissions
+// @Description List permissions
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) ListPermissions(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -141,7 +185,15 @@ func (h *RbacHandler) ListPermissions(c *gin.Context) {
 	response.RespondSuccess(c, perms, "ok")
 }
 
-// CreatePermission POST /admin/rbac/permissions
+// @Router /api/v1/admin/rbac/permissions [post]
+// @Tags RBAC
+// @Summary Create permission
+// @Description Create permission
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) CreatePermission(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -162,7 +214,15 @@ func (h *RbacHandler) CreatePermission(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"permission": perm, "message": "permission created"})
 }
 
-// AssignPermission POST /admin/rbac/roles/:id/permissions
+// @Router /api/v1/admin/rbac/roles/:id/permissions [post]
+// @Tags RBAC
+// @Summary Assign permission
+// @Description Assign permission
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) AssignPermission(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -182,7 +242,14 @@ func (h *RbacHandler) AssignPermission(c *gin.Context) {
 	response.RespondSuccess(c, nil, "permission assigned — cache invalidated")
 }
 
-// RevokePermission DELETE /admin/rbac/roles/:id/permissions/:perm_id
+// @Router /api/v1/admin/rbac/roles/:id/permissions/:perm_id [delete]
+// @Tags RBAC
+// @Summary Revoke permission
+// @Description Revoke permission
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) RevokePermission(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -196,9 +263,16 @@ func (h *RbacHandler) RevokePermission(c *gin.Context) {
 	response.RespondSuccess(c, nil, "permission revoked — cache invalidated")
 }
 
-// InvalidateAll POST /admin/rbac/cache/invalidate
+// @Router /api/v1/admin/rbac/cache/invalidate [post]
+// @Tags RBAC
+// @Summary Invalidate cache
+// @Description Invalidate cache
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *RbacHandler) InvalidateAll(c *gin.Context) {
-	h.svc.InvalidateAll()
+	h.svc.InvalidateAll(c.Request.Context())
 	logger.HandlerWarn(c, "iam.rbac.cache-invalidate", nil, "entire rbac cache flushed")
 	response.RespondSuccess(c, nil, "rbac cache flushed")
 }

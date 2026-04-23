@@ -5,58 +5,13 @@ import { createPortal } from "react-dom";
 import dynamic from "next/dynamic";
 import type { ApexOptions } from "apexcharts";
 import ComponentCard from "@/components/common/ComponentCard";
+import { getSMTPOverview } from "@/components/smtp/api";
+import { useSMTPWorkspace } from "@/components/smtp/SMTPWorkspaceProvider";
+import type { SMTPOverview } from "@/components/smtp/types";
 
 const ReactApexChart = dynamic(() => import("react-apexcharts"), {
   ssr: false,
 });
-
-type OverviewResponse = {
-  metrics: {
-    delivered_today: number;
-    queued_now: number;
-    active_lanes: number;
-    total_lanes: number;
-    live_templates: number;
-    total_templates: number;
-  };
-  delivery_throughput: Array<{
-    label: string;
-    delivered: number;
-    queued: number;
-    retries: number;
-  }>;
-  health_distribution: {
-    healthy: number;
-    warning: number;
-    stopped: number;
-  };
-  queue_mix: Array<{
-    category: string;
-    pending: number;
-    processing: number;
-    retry: number;
-  }>;
-  lanes: Array<{
-    id: string;
-    name: string;
-    traffic_class: string;
-    status: string;
-    template_count: number;
-    shard_count: number;
-    ready_shards: number;
-    draining_shards: number;
-    pending_shards: number;
-  }>;
-  timeline: Array<{
-    id: string;
-    entity_type: string;
-    entity_name: string;
-    action: string;
-    actor_name: string;
-    note: string;
-    created_at: string;
-  }>;
-};
 
 const baseDeliveryOptions: ApexOptions = {
   chart: {
@@ -162,7 +117,8 @@ const baseQueueMixOptions: ApexOptions = {
 };
 
 export function GeneralTab() {
-  const [overview, setOverview] = useState<OverviewResponse | null>(null);
+  const { workspace, workspaceID, isLoading: isWorkspaceLoading, error: workspaceError } = useSMTPWorkspace();
+  const [overview, setOverview] = useState<SMTPOverview | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [isChartReady, setIsChartReady] = useState(false);
@@ -170,6 +126,13 @@ export function GeneralTab() {
   const [timelineSearch, setTimelineSearch] = useState("");
 
   useEffect(() => {
+    if (workspaceID === "") {
+      setOverview(null);
+      setIsLoading(false);
+      setError("");
+      return;
+    }
+
     let cancelled = false;
 
     async function loadOverview() {
@@ -177,15 +140,7 @@ export function GeneralTab() {
       setError("");
 
       try {
-        const response = await fetch("/api/v1/smtp/overview", {
-          method: "GET",
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error("Failed to load SMTP overview");
-        }
-
-        const result = (await response.json()) as OverviewResponse;
+        const result = await getSMTPOverview(workspaceID);
         if (!cancelled) {
           setOverview(result);
         }
@@ -204,18 +159,18 @@ export function GeneralTab() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [workspaceID]);
 
   useEffect(() => {
     setIsChartReady(true);
   }, []);
 
-  const throughput = overview?.delivery_throughput ?? [];
-  const queueMix = overview?.queue_mix ?? [];
-  const timeline = overview?.timeline ?? [];
-  const timelinePreview = timeline.slice(0, 10);
+  const throughput = useMemo(() => overview?.deliveryThroughput ?? [], [overview]);
+  const queueMix = useMemo(() => overview?.queueMix ?? [], [overview]);
+  const timeline = useMemo(() => overview?.timeline ?? [], [overview]);
+  const timelinePreview = useMemo(() => timeline.slice(0, 10), [timeline]);
   const metrics = overview?.metrics;
-  const health = overview?.health_distribution;
+  const health = overview?.healthDistribution;
   const filteredTimeline = useMemo(() => {
     const keyword = timelineSearch.trim().toLowerCase();
     if (keyword === "") {
@@ -223,10 +178,10 @@ export function GeneralTab() {
     }
     return timeline.filter((item) => {
       const haystack = [
-        item.entity_name,
-        item.entity_type,
+        item.entityName,
+        item.entityType,
         item.action,
-        item.actor_name,
+        item.actorName,
         item.note,
         formatTimelineTitle(item),
         formatTimelineDetail(item),
@@ -270,7 +225,7 @@ export function GeneralTab() {
     () => [
       { name: "Pending", data: queueMix.map((item) => item.pending) },
       { name: "Processing", data: queueMix.map((item) => item.processing) },
-      { name: "Retry", data: queueMix.map((item) => item.retry) },
+      { name: "Retry", data: queueMix.map((item) => item.retries) },
     ],
     [queueMix],
   );
@@ -313,10 +268,40 @@ export function GeneralTab() {
       return { label: "No traffic", value: 0 };
     }
     return queueMix.reduce((best, item) => {
-      const total = item.pending + item.processing + item.retry;
+      const total = item.pending + item.processing + item.retries;
       return total > best.value ? { label: item.category, value: total } : best;
-    }, { label: queueMix[0].category, value: queueMix[0].pending + queueMix[0].processing + queueMix[0].retry });
+    }, { label: queueMix[0].category, value: queueMix[0].pending + queueMix[0].processing + queueMix[0].retries });
   }, [queueMix]);
+
+  if (isWorkspaceLoading) {
+    return (
+      <ComponentCard title="SMTP Overview" desc="Resolving workspace context...">
+        <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-400">
+          Loading workspaces...
+        </div>
+      </ComponentCard>
+    );
+  }
+
+  if (workspaceError !== "") {
+    return (
+      <ComponentCard title="SMTP Overview" desc="Workspace resolution failed.">
+        <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-4 text-sm text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/30 dark:text-rose-200">
+          {workspaceError}
+        </div>
+      </ComponentCard>
+    );
+  }
+
+  if (workspace == null) {
+    return (
+      <ComponentCard title="SMTP Overview" desc="Choose a workspace to load SMTP data.">
+        <div className="rounded-2xl border border-gray-200 bg-gray-50 px-4 py-4 text-sm text-gray-500 dark:border-gray-800 dark:bg-gray-900/30 dark:text-gray-400">
+          No workspace is available for SMTP yet.
+        </div>
+      </ComponentCard>
+    );
+  }
 
   if (isLoading) {
     return (
@@ -355,29 +340,29 @@ export function GeneralTab() {
       <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
         <MetricCard
           title="Delivered Today"
-          value={formatNumber(metrics?.delivered_today ?? 0)}
+          value={formatNumber(metrics?.deliveredToday ?? 0)}
           delta={`${formatNumber(throughput.reduce((sum, item) => sum + item.delivered, 0))} in window`}
           tone="blue"
           caption="Messages marked sent today"
         />
         <MetricCard
           title="Queued Right Now"
-          value={formatNumber(metrics?.queued_now ?? 0)}
-          delta={`${formatNumber(queueMix.reduce((sum, item) => sum + item.retry, 0))} retry`}
+          value={formatNumber(metrics?.queuedNow ?? 0)}
+          delta={`${formatNumber(queueMix.reduce((sum, item) => sum + item.retries, 0))} retry`}
           tone="emerald"
           caption="Pending + processing + failed mail"
         />
         <MetricCard
-          title="Active Lanes"
-          value={`${metrics?.active_lanes ?? 0} / ${metrics?.total_lanes ?? 0}`}
-          delta={`${metrics?.total_lanes ?? 0} listed`}
+          title="Active Gateways"
+          value={`${metrics?.activeGateways ?? 0} / ${metrics?.totalGateways ?? 0}`}
+          delta={`${metrics?.totalGateways ?? 0} listed`}
           tone="amber"
-          caption="Only active lanes can accept consumer mail"
+          caption="Only active gateways can accept routed mail"
         />
         <MetricCard
           title="Template Coverage"
-          value={formatNumber(metrics?.total_templates ?? 0)}
-          delta={`${metrics?.live_templates ?? 0} live`}
+          value={formatNumber(metrics?.totalTemplates ?? 0)}
+          delta={`${metrics?.liveTemplates ?? 0} live`}
           tone="slate"
           caption="Templates currently registered in SMTP"
         />
@@ -503,7 +488,7 @@ export function GeneralTab() {
                     }`}
                   >
                     <div className="text-xs font-medium tracking-[0.12em] text-gray-400 uppercase whitespace-pre-line">
-                      {formatTimelineTimestamp(item.created_at)}
+                      {formatTimelineTimestamp(item.createdAt)}
                     </div>
                     <div className="min-w-0">
                       <p className="text-sm font-semibold text-gray-900 dark:text-white">
@@ -649,7 +634,7 @@ function TimelineDialog({
 }: {
   open: boolean;
   search: string;
-  items: OverviewResponse["timeline"];
+  items: SMTPOverview["timeline"];
   onClose: () => void;
   onSearchChange: (value: string) => void;
 }) {
@@ -710,7 +695,7 @@ function TimelineDialog({
                   }`}
                 >
                   <div className="text-xs font-medium tracking-[0.12em] text-gray-400 uppercase whitespace-pre-line">
-                    {formatTimelineTimestamp(item.created_at)}
+                    {formatTimelineTimestamp(item.createdAt)}
                   </div>
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-gray-900 dark:text-white">
@@ -737,20 +722,20 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
 }
 
-function formatTimelineTitle(item: NonNullable<OverviewResponse["timeline"]>[number]) {
+function formatTimelineTitle(item: NonNullable<SMTPOverview["timeline"]>[number]) {
   const entity =
-    item.entity_name ||
-    (item.entity_type ? item.entity_type.replaceAll("_", " ") : "smtp item");
+    item.entityName ||
+    (item.entityType ? item.entityType.replaceAll("_", " ") : "smtp item");
   const action = item.action ? item.action.replaceAll("_", " ") : "updated";
   return `${entity} ${action}`;
 }
 
-function formatTimelineDetail(item: NonNullable<OverviewResponse["timeline"]>[number]) {
+function formatTimelineDetail(item: NonNullable<SMTPOverview["timeline"]>[number]) {
   if (item.note?.trim()) {
     return item.note.trim();
   }
-  if (item.actor_name?.trim()) {
-    return `by ${item.actor_name.trim()}`;
+  if (item.actorName?.trim()) {
+    return `by ${item.actorName.trim()}`;
   }
   return "";
 }

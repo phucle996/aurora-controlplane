@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"controlplane/internal/http/middleware"
@@ -22,31 +23,38 @@ type DeviceHandler struct {
 	deviceSvc iam_domainsvc.DeviceService
 }
 
+var deviceListPool sync.Pool
+
 func NewDeviceHandler(deviceSvc iam_domainsvc.DeviceService) *DeviceHandler {
 	return &DeviceHandler{deviceSvc: deviceSvc}
 }
 
-// ── Security ──────────────────────────────────────────────────────────────────
-
-// IssueChallenge POST /devices/challenge
+// @Summary Issue challenge
+// @Description Issue challenge for device
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Router /devices/challenge [post]
 func (h *DeviceHandler) IssueChallenge(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
 		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
 
-	var req iam_reqdto.IssueChallengeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.HandlerWarn(c, "iam.device.challenge", err, "invalid payload")
-		response.RespondBadRequest(c, "invalid request payload")
+	deviceID := strings.TrimSpace(middleware.GetDeviceID(c))
+	if deviceID == "" {
+		logger.HandlerWarn(c, "iam.device.challenge", nil, "device id is required")
+		response.RespondBadRequest(c, "device id is required")
 		return
 	}
 
-	ch, err := h.deviceSvc.IssueChallenge(ctx, claims.Subject, strings.TrimSpace(req.DeviceID))
+	ch, err := h.deviceSvc.IssueChallenge(ctx, userID, deviceID)
 	if err != nil {
 		logger.HandlerError(c, "iam.device.challenge", err)
 		h.mapDeviceError(c, err)
@@ -61,7 +69,14 @@ func (h *DeviceHandler) IssueChallenge(c *gin.Context) {
 	}, "challenge issued")
 }
 
-// VerifyProof POST /devices/verify
+// @Summary Verify proof
+// @Description Verify proof for device
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Router /devices/verify [post]
 func (h *DeviceHandler) VerifyProof(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -73,7 +88,18 @@ func (h *DeviceHandler) VerifyProof(c *gin.Context) {
 		return
 	}
 
-	proof := proofFromReq(req)
+	deviceID := strings.TrimSpace(middleware.GetDeviceID(c))
+	if deviceID == "" {
+		logger.HandlerWarn(c, "iam.device.verify", nil, "device id is required")
+		response.RespondBadRequest(c, "device id is required")
+		return
+	}
+
+	proof := &entity.DeviceProof{
+		ChallengeID: req.ChallengeID,
+		DeviceID:    deviceID,
+		Signature:   req.Signature,
+	}
 
 	if err := h.deviceSvc.VerifyProof(ctx, proof); err != nil {
 		logger.HandlerError(c, "iam.device.verify", err)
@@ -85,13 +111,20 @@ func (h *DeviceHandler) VerifyProof(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device proof verified")
 }
 
-// RotateKey POST /devices/rotate-key
+// @Summary Rotate key
+// @Description Rotate key for device
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Router /devices/rotate-key [post]
 func (h *DeviceHandler) RotateKey(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
 		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
@@ -103,7 +136,14 @@ func (h *DeviceHandler) RotateKey(c *gin.Context) {
 		return
 	}
 
-	if err := h.deviceSvc.RotateKey(ctx, claims.Subject, req.DeviceID, req.NewPublicKey, req.NewAlgorithm); err != nil {
+	deviceID := strings.TrimSpace(middleware.GetDeviceID(c))
+	if deviceID == "" {
+		logger.HandlerWarn(c, "iam.device.rotate-key", nil, "device id is required")
+		response.RespondBadRequest(c, "device id is required")
+		return
+	}
+
+	if err := h.deviceSvc.RotateKey(ctx, userID, deviceID, req.NewPublicKey, req.NewAlgorithm); err != nil {
 		logger.HandlerError(c, "iam.device.rotate-key", err)
 		h.mapDeviceError(c, err)
 		return
@@ -113,14 +153,22 @@ func (h *DeviceHandler) RotateKey(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device key rotated")
 }
 
-// Rebind POST /devices/rebind
+// @Summary Rebind device
+// @Description Rebind device
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Router /devices/rebind [post]
 func (h *DeviceHandler) Rebind(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
-		response.RespondUnauthorized(c, "unauthorized")
+	userID := middleware.GetUserID(c)
+	if strings.TrimSpace(userID) == "" {
+		logger.HandlerWarn(c, "iam.device.rebind", nil, "user id is required")
+		response.RespondBadRequest(c, "user id is required")
 		return
 	}
 
@@ -131,15 +179,21 @@ func (h *DeviceHandler) Rebind(c *gin.Context) {
 		return
 	}
 
-	// Verify proof before rebind
-	proof := proofFromRebindReq(req)
-	if err := h.deviceSvc.VerifyProof(ctx, proof); err != nil {
-		logger.HandlerError(c, "iam.device.rebind", err)
-		h.mapDeviceError(c, err)
+	deviceID := strings.TrimSpace(middleware.GetDeviceID(c))
+	if deviceID == "" {
+		logger.HandlerWarn(c, "iam.device.rebind", nil, "device id is required")
+		response.RespondBadRequest(c, "device id is required")
 		return
 	}
 
-	if err := h.deviceSvc.Rebind(ctx, claims.Subject, req.DeviceID, req.NewPublicKey, req.NewAlgorithm); err != nil {
+	proof := &entity.DeviceProof{
+		ChallengeID:  req.ChallengeID,
+		DeviceID:     deviceID,
+		Signature:    req.Signature,
+		NewPublicKey: req.NewPublicKey,
+		NewAlgorithm: req.NewAlgorithm,
+	}
+	if err := h.deviceSvc.Rebind(ctx, userID, proof); err != nil {
 		logger.HandlerError(c, "iam.device.rebind", err)
 		h.mapDeviceError(c, err)
 		return
@@ -149,24 +203,32 @@ func (h *DeviceHandler) Rebind(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device rebound successfully")
 }
 
-// RevokeDevice DELETE /devices/:device_id/revoke  (security group)
+// @Summary Revoke device
+// @Description Revoke device by ID
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Failure 404 {object} iam_respdto.Error
+// @Router /devices/:id/revoke [delete]
 func (h *DeviceHandler) RevokeDevice(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
 		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
 
-	deviceID := strings.TrimSpace(c.Param("device_id"))
+	deviceID := strings.TrimSpace(c.Param("id"))
 	if deviceID == "" {
 		response.RespondBadRequest(c, "device_id is required")
 		return
 	}
 
-	if err := h.deviceSvc.Revoke(ctx, claims.Subject, deviceID); err != nil {
+	if err := h.deviceSvc.Revoke(ctx, userID, deviceID); err != nil {
 		logger.HandlerError(c, "iam.device.revoke", err)
 		h.mapDeviceError(c, err)
 		return
@@ -176,12 +238,20 @@ func (h *DeviceHandler) RevokeDevice(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device revoked")
 }
 
-// Quarantine POST /devices/:device_id/quarantine  (security group)
+// @Summary Quarantine device
+// @Description Quarantine device by ID
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Failure 404 {object} iam_respdto.Error
+// @Router /devices/:id/quarantine [post]
 func (h *DeviceHandler) Quarantine(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	deviceID := strings.TrimSpace(c.Param("device_id"))
+	deviceID := strings.TrimSpace(c.Param("id"))
 	if deviceID == "" {
 		response.RespondBadRequest(c, "device_id is required")
 		return
@@ -197,70 +267,72 @@ func (h *DeviceHandler) Quarantine(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device quarantined")
 }
 
-// ── User self-service ─────────────────────────────────────────────────────────
-
-// ListMyDevices GET /api/v1/me/devices
+// @Summary List devices for current user
+// @Description List devices for current user
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 401 {object} iam_respdto.Error
+// @Failure 500 {object} iam_respdto.Error
+// @Router /me/devices [get]
 func (h *DeviceHandler) ListMyDevices(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
 		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
 
-	devices, err := h.deviceSvc.ListByUserID(ctx, claims.Subject)
+	devices, err := h.deviceSvc.ListByUserID(ctx, userID)
 	if err != nil {
 		logger.HandlerError(c, "iam.device.list", err)
 		response.RespondInternalError(c, "failed to retrieve devices")
 		return
 	}
 
-	response.RespondSuccess(c, devices, "")
+	// Reuse response slice container for the list-my-devices hot path.
+	borrowDeviceList := func(minCap int) []*entity.Device {
+		if minCap < iamPooledSliceDefaultCap {
+			minCap = iamPooledSliceDefaultCap
+		}
+		if pooled, ok := deviceListPool.Get().([]*entity.Device); ok && cap(pooled) >= minCap {
+			return pooled[:0]
+		}
+		return make([]*entity.Device, 0, minCap)
+	}
+	releaseDeviceList := func(items []*entity.Device) {
+		if cap(items) == 0 || cap(items) > iamPooledSliceMaxCap {
+			return
+		}
+		full := items[:cap(items)]
+		clear(full)
+		deviceListPool.Put(full[:0])
+	}
+
+	items := borrowDeviceList(len(devices))
+	items = append(items, devices...)
+	defer releaseDeviceList(items)
+
+	response.RespondSuccess(c, items, "ok")
 }
 
-// RenameDevice PATCH /api/v1/me/devices/:device_id/name
-func (h *DeviceHandler) RenameDevice(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
-	defer cancel()
-
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
-		response.RespondUnauthorized(c, "unauthorized")
-		return
-	}
-
-	deviceID := strings.TrimSpace(c.Param("device_id"))
-	if deviceID == "" {
-		response.RespondBadRequest(c, "device_id is required")
-		return
-	}
-
-	var req iam_reqdto.RenameDeviceRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.HandlerWarn(c, "iam.device.rename", err, "invalid payload")
-		response.RespondBadRequest(c, "invalid request payload")
-		return
-	}
-
-	if err := h.deviceSvc.Rename(ctx, claims.Subject, deviceID, req.Name); err != nil {
-		logger.HandlerError(c, "iam.device.rename", err)
-		h.mapDeviceError(c, err)
-		return
-	}
-
-	logger.HandlerInfo(c, "iam.device.rename", "device renamed")
-	response.RespondSuccess(c, nil, "device renamed")
-}
-
-// RevokeOneDevice DELETE /api/v1/me/devices/:device_id
+// @Summary Revoke one device
+// @Description Revoke one device for current user
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 401 {object} iam_respdto.Error
+// @Router /me/devices/:id [delete]
 func (h *DeviceHandler) RevokeOneDevice(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
 		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
@@ -271,7 +343,7 @@ func (h *DeviceHandler) RevokeOneDevice(c *gin.Context) {
 		return
 	}
 
-	if err := h.deviceSvc.RevokeOne(ctx, claims.Subject, deviceID); err != nil {
+	if err := h.deviceSvc.RevokeOne(ctx, userID, deviceID); err != nil {
 		logger.HandlerError(c, "iam.device.revoke-one", err)
 		h.mapDeviceError(c, err)
 		return
@@ -281,26 +353,32 @@ func (h *DeviceHandler) RevokeOneDevice(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device revoked")
 }
 
-// RevokeOtherDevices DELETE /api/v1/me/devices/others
+// @Summary Revoke other devices
+// @Description Revoke other devices for current user
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 401 {object} iam_respdto.Error
+// @Router /me/devices/others [delete]
 func (h *DeviceHandler) RevokeOtherDevices(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	claims, ok := middleware.JWTClaims(c)
-	if !ok {
+	userID := middleware.GetUserID(c)
+	if userID == "" {
 		response.RespondUnauthorized(c, "unauthorized")
 		return
 	}
 
-	// The "current" device is optionally passed as a query param so the caller
-	// can keep itself alive.
-	keepDeviceID := strings.TrimSpace(c.Query("keep_device_id"))
-	if keepDeviceID == "" {
-		response.RespondBadRequest(c, "keep_device_id query param is required")
+	deviceID := strings.TrimSpace(middleware.GetDeviceID(c))
+	if deviceID == "" {
+		logger.HandlerWarn(c, "iam.device.revoke-others", nil, "device_id is required")
+		response.RespondBadRequest(c, "device_id is required")
 		return
 	}
 
-	n, err := h.deviceSvc.RevokeOthers(ctx, claims.Subject, keepDeviceID)
+	n, err := h.deviceSvc.RevokeOthers(ctx, userID, deviceID)
 	if err != nil {
 		logger.HandlerError(c, "iam.device.revoke-others", err)
 		h.mapDeviceError(c, err)
@@ -313,12 +391,22 @@ func (h *DeviceHandler) RevokeOtherDevices(c *gin.Context) {
 
 // ── Admin / internal ──────────────────────────────────────────────────────────
 
-// AdminGetDevice GET /admin/devices/:device_id
+// @Summary Get device
+// @Description Get device by ID
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Param id path string true "device ID"
+// @Success 200 {object} iam_respdto.Device
+// @Failure 400 {object} iam_respdto.Error
+// @Failure 404 {object} iam_respdto.Error
+// @Failure 500 {object} iam_respdto.Error
+// @Router /admin/devices/:id [get]
 func (h *DeviceHandler) AdminGetDevice(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	deviceID := strings.TrimSpace(c.Param("device_id"))
+	deviceID := strings.TrimSpace(c.Param("id"))
 	if deviceID == "" {
 		response.RespondBadRequest(c, "device_id is required")
 		return
@@ -334,12 +422,22 @@ func (h *DeviceHandler) AdminGetDevice(c *gin.Context) {
 	response.RespondSuccess(c, device, "")
 }
 
-// AdminForceRevoke DELETE /admin/devices/:device_id
+// @Summary Force revoke device
+// @Description Force revoke device by ID
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Param device_id path string true "device ID"
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Failure 404 {object} iam_respdto.Error
+// @Failure 500 {object} iam_respdto.Error
+// @Router /admin/devices/:id [delete]
 func (h *DeviceHandler) AdminForceRevoke(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	deviceID := strings.TrimSpace(c.Param("device_id"))
+	deviceID := strings.TrimSpace(c.Param("id"))
 	if deviceID == "" {
 		response.RespondBadRequest(c, "device_id is required")
 		return
@@ -355,12 +453,19 @@ func (h *DeviceHandler) AdminForceRevoke(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device force-revoked")
 }
 
-// AdminMarkSuspicious PATCH /admin/devices/:device_id/suspicious
+// @Summary Mark device as suspicious
+// @Description Mark device as suspicious by ID
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Router /admin/devices/:id/suspicious [post]
 func (h *DeviceHandler) AdminMarkSuspicious(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	deviceID := strings.TrimSpace(c.Param("device_id"))
+	deviceID := strings.TrimSpace(c.Param("id"))
 	if deviceID == "" {
 		response.RespondBadRequest(c, "device_id is required")
 		return
@@ -383,7 +488,15 @@ func (h *DeviceHandler) AdminMarkSuspicious(c *gin.Context) {
 	response.RespondSuccess(c, nil, "device updated")
 }
 
-// AdminCleanupStale DELETE /admin/devices/stale
+// @Summary Cleanup stale devices
+// @Description Cleanup stale devices
+// @Tags device
+// @Accept  json
+// @Produce  json
+// @Success 200 {object} iam_respdto.Success
+// @Failure 400 {object} iam_respdto.Error
+// @Failure 500 {object} iam_respdto.Error
+// @Router /admin/devices/stale [delete]
 func (h *DeviceHandler) AdminCleanupStale(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
@@ -420,27 +533,14 @@ func (h *DeviceHandler) mapDeviceError(c *gin.Context, err error) {
 	case errors.Is(err, iam_errorx.ErrDeviceChallengeInvalid),
 		errors.Is(err, iam_errorx.ErrDeviceChallengeNotFound):
 		response.RespondBadRequest(c, "challenge invalid or expired")
+	case errors.Is(err, iam_errorx.ErrDeviceBindingRequired),
+		errors.Is(err, iam_errorx.ErrDeviceKeyInvalid):
+		response.RespondBadRequest(c, "invalid request payload")
 	case errors.Is(err, iam_errorx.ErrDeviceProofInvalid):
 		response.RespondBadRequest(c, "device proof invalid")
 	case errors.Is(err, iam_errorx.ErrDeviceKeyRotateFailed):
 		response.RespondInternalError(c, "key rotation failed")
 	default:
 		response.RespondInternalError(c, "an unexpected error occurred")
-	}
-}
-
-func proofFromReq(req iam_reqdto.VerifyProofRequest) *entity.DeviceProof {
-	return &entity.DeviceProof{
-		ChallengeID: req.ChallengeID,
-		DeviceID:    req.DeviceID,
-		Signature:   req.Signature,
-	}
-}
-
-func proofFromRebindReq(req iam_reqdto.RebindRequest) *entity.DeviceProof {
-	return &entity.DeviceProof{
-		ChallengeID: req.ChallengeID,
-		DeviceID:    req.DeviceID,
-		Signature:   req.Signature,
 	}
 }

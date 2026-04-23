@@ -12,6 +12,8 @@ type RbacRepository interface {
 	// This is the cache-miss fallback used by RbacService.
 	GetRoleByName(ctx context.Context, name string) (*entity.RoleWithPermissions, error)
 
+	ListRoleEntries(ctx context.Context) ([]*entity.RoleWithPermissions, error)
+
 	ListRoles(ctx context.Context) ([]*entity.Role, error)
 	GetRoleByID(ctx context.Context, id string) (*entity.Role, error)
 	CreateRole(ctx context.Context, role *entity.Role) error

@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 	"time"
 
 	"controlplane/internal/http/middleware"
 	"controlplane/internal/http/response"
+	"controlplane/internal/iam/domain/entity"
 	iam_domainsvc "controlplane/internal/iam/domain/service"
 	iam_errorx "controlplane/internal/iam/errorx"
 	iam_reqdto "controlplane/internal/iam/transport/http/request"
@@ -22,6 +24,8 @@ type MfaHandler struct {
 	tokenSvc iam_domainsvc.TokenService
 }
 
+var mfaMethodPool sync.Pool
+
 func NewMfaHandler(
 	mfaSvc iam_domainsvc.MfaService,
 	tokenSvc iam_domainsvc.TokenService,
@@ -34,14 +38,18 @@ func NewMfaHandler(
 
 // ── Challenge flow ────────────────────────────────────────────────────────────
 
-// Verify POST /api/v1/auth/mfa/verify  (public — no access token needed)
-//
-// Client receives challengeID from LoginResult.MFAChallengeID.
-// On success, new token pair is issued and returned.
+// @Router /api/v1/auth/mfa/verify [post]
+// @Tags MFA
+// @Summary Verify MFA
+// @Description Verify MFA
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *MfaHandler) Verify(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	_ = ctx
 
 	var req iam_reqdto.MfaVerifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -68,50 +76,26 @@ func (h *MfaHandler) Verify(c *gin.Context) {
 		return
 	}
 
-	secureCookie := c.Request.TLS != nil
-	accessMaxAge := int(time.Until(tokenResult.AccessTokenExpiresAt).Seconds())
-	refreshMaxAge := int(time.Until(tokenResult.RefreshTokenExpiresAt).Seconds())
-
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "access_token",
-		Value:    tokenResult.AccessToken,
-		Path:     "/",
-		MaxAge:   accessMaxAge,
-		Expires:  tokenResult.AccessTokenExpiresAt,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-	http.SetCookie(c.Writer, &http.Cookie{
-		Name:     "refresh_token",
-		Value:    tokenResult.RefreshToken,
-		Path:     "/",
-		MaxAge:   refreshMaxAge,
-		Expires:  tokenResult.RefreshTokenExpiresAt,
-		HttpOnly: true,
-		Secure:   secureCookie,
-		SameSite: http.SameSiteLaxMode,
-	})
-	logger.HandlerInfo(c, "iam.mfa.verify", "mfa verified — tokens issued")
-	response.RespondSuccess(c, gin.H{
-		"access_token":             tokenResult.AccessToken,
-		"refresh_token":            tokenResult.RefreshToken,
-		"device_id":                tokenResult.DeviceID,
-		"access_token_expires_at":  tokenResult.AccessTokenExpiresAt.Unix(),
-		"refresh_token_expires_at": tokenResult.RefreshTokenExpiresAt.Unix(),
-	}, "authentication successful")
+	setSessionCookies(c, tokenResult.AccessToken, tokenResult.RefreshToken, tokenResult.DeviceID, tokenResult.AccessTokenExpiresAt, tokenResult.RefreshTokenExpiresAt)
+	logger.HandlerInfo(c, "iam.mfa.verify", "mfa verified — cookies issued")
+	c.AbortWithStatus(http.StatusNoContent)
 }
 
 // ── Self-service (requires access token) ─────────────────────────────────────
 
-// ListMethods GET /api/v1/me/mfa
+// @Router /api/v1/me/mfa [get]
+// @Tags MFA
+// @Summary List MFA methods
+// @Description List MFA methods
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *MfaHandler) ListMethods(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	methods, err := h.mfaSvc.ListMethods(ctx, userID)
 	if err != nil {
 		logger.HandlerError(c, "iam.mfa.list-methods", err)
@@ -120,14 +104,45 @@ func (h *MfaHandler) ListMethods(c *gin.Context) {
 	}
 
 	logger.HandlerInfo(c, "iam.mfa.list-methods", "mfa methods listed")
-	response.RespondSuccess(c, methods, "ok")
+
+	// Reuse response slice container for frequent MFA settings reads.
+	borrowMethods := func(minCap int) []*entity.MfaSetting {
+		if minCap < iamPooledSliceDefaultCap {
+			minCap = iamPooledSliceDefaultCap
+		}
+		if pooled, ok := mfaMethodPool.Get().([]*entity.MfaSetting); ok && cap(pooled) >= minCap {
+			return pooled[:0]
+		}
+		return make([]*entity.MfaSetting, 0, minCap)
+	}
+	releaseMethods := func(items []*entity.MfaSetting) {
+		if cap(items) == 0 || cap(items) > iamPooledSliceMaxCap {
+			return
+		}
+		full := items[:cap(items)]
+		clear(full)
+		mfaMethodPool.Put(full[:0])
+	}
+
+	items := borrowMethods(len(methods))
+	items = append(items, methods...)
+	defer releaseMethods(items)
+
+	response.RespondSuccess(c, items, "ok")
 }
 
-// EnrollTOTP POST /api/v1/me/mfa/totp/enroll
+// @Router /api/v1/me/mfa/totp/enroll [post]
+// @Tags MFA
+// @Summary Enroll TOTP
+// @Description Enroll TOTP
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *MfaHandler) EnrollTOTP(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	var req iam_reqdto.MfaEnrollTOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -136,7 +151,6 @@ func (h *MfaHandler) EnrollTOTP(c *gin.Context) {
 	}
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	settingID, provisioningURI, err := h.mfaSvc.EnrollTOTP(ctx, userID, req.DeviceName)
 	if err != nil {
 		logger.HandlerError(c, "iam.mfa.enroll-totp", err)
@@ -151,11 +165,18 @@ func (h *MfaHandler) EnrollTOTP(c *gin.Context) {
 	}, "scan the QR code and confirm with a valid code")
 }
 
-// ConfirmTOTP POST /api/v1/me/mfa/totp/confirm
+// @Router /api/v1/me/mfa/totp/confirm [post]
+// @Tags MFA
+// @Summary Confirm TOTP
+// @Description Confirm TOTP
+// @Accept json
+// @Produce json
+// @Success 200 {object} response.Response
+// @Failure 400 {object} response.Response
+// @Failure 500 {object} response.Response
 func (h *MfaHandler) ConfirmTOTP(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	var req iam_reqdto.MfaConfirmTOTPRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -164,7 +185,6 @@ func (h *MfaHandler) ConfirmTOTP(c *gin.Context) {
 	}
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	if err := h.mfaSvc.ConfirmTOTP(ctx, userID, req.SettingID, req.Code); err != nil {
 		logger.HandlerError(c, "iam.mfa.confirm-totp", err)
 		h.mapMfaError(c, err)
@@ -179,10 +199,8 @@ func (h *MfaHandler) ConfirmTOTP(c *gin.Context) {
 func (h *MfaHandler) EnableMethod(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	settingID := c.Param("setting_id")
 	if err := h.mfaSvc.EnableMethod(ctx, userID, settingID); err != nil {
 		logger.HandlerError(c, "iam.mfa.enable", err)
@@ -197,10 +215,8 @@ func (h *MfaHandler) EnableMethod(c *gin.Context) {
 func (h *MfaHandler) DisableMethod(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	settingID := c.Param("setting_id")
 	if err := h.mfaSvc.DisableMethod(ctx, userID, settingID); err != nil {
 		logger.HandlerError(c, "iam.mfa.disable", err)
@@ -215,10 +231,8 @@ func (h *MfaHandler) DisableMethod(c *gin.Context) {
 func (h *MfaHandler) DeleteMethod(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	settingID := c.Param("setting_id")
 	if err := h.mfaSvc.DeleteMethod(ctx, userID, settingID); err != nil {
 		logger.HandlerError(c, "iam.mfa.delete", err)
@@ -233,10 +247,8 @@ func (h *MfaHandler) DeleteMethod(c *gin.Context) {
 func (h *MfaHandler) GenerateRecoveryCodes(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	_ = ctx
 
 	userID := c.GetString(middleware.CtxKeyUserID)
-	_ = userID
 	codes, err := h.mfaSvc.GenerateRecoveryCodes(ctx, userID)
 	if err != nil {
 		logger.HandlerError(c, "iam.mfa.recovery-codes", err)

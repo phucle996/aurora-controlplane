@@ -16,6 +16,7 @@ type UserRepository interface {
 	GetByUsername(ctx context.Context, username string) (*entity.User, error)
 	GetByID(ctx context.Context, id string) (*entity.User, error)
 	GetProfileByUserID(ctx context.Context, userID string) (*entity.UserProfile, error)
+	GetWhoAmI(ctx context.Context, userID string) (*entity.WhoAmI, error)
 	UpdatePassword(ctx context.Context, userID, newPasswordHash string) error
 	CreateRefreshToken(ctx context.Context, token *entity.RefreshToken) error
 }

@@ -3,12 +3,16 @@ package middleware
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
+	"time"
 
 	"controlplane/internal/http/response"
 	"controlplane/internal/security"
 	"controlplane/pkg/logger"
 
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 // Context keys injected by the Access middleware.
@@ -16,44 +20,88 @@ import (
 const (
 	jwtClaimsContextKey = "jwt_claims" // full security.Claims object
 
-	CtxKeyUserID = "user_id" // string — JWT subject
-	CtxKeyRole   = "role"    // string — user role
-	CtxKeyJTI    = "jti"     // string — token ID
-	CtxKeyStatus = "status"  // string — account status
-	CtxKeyLevel  = "level"   // int    — security level (0=highest)
+	CtxKeyUserID   = "user_id"   // string — JWT subject
+	CtxKeyRole     = "role"      // string — user role
+	CtxKeyJTI      = "jti"       // string — token ID
+	CtxKeyStatus   = "status"    // string — account status
+	CtxKeyLevel    = "level"     // int    — security level (0=highest)
+	CtxKeyTenant   = "tenant"    // string — tenant ID
+	CtxKeyDeviceID = "device_id" // string — device ID
 )
 
-type TokenBlacklist interface {
-	IsBlacklisted(ctx context.Context, jti string) bool
+var (
+	secretProvider security.SecretProvider
+	redisClient    *redis.Client
+)
+
+// Init initializes the global state used by the middleware.
+func Init(sp security.SecretProvider, rdb *redis.Client) {
+	secretProvider = sp
+	redisClient = rdb
 }
 
 // Access validates a Bearer JWT and injects parsed claims into the gin context.
 // It also checks the token's JTI against a blacklist (e.g. for logged-out tokens).
-func Access(secret string, blacklist TokenBlacklist) gin.HandlerFunc {
+func Access() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		token, ok := security.ExtractBearerToken(c.GetHeader("Authorization"))
 		if !ok {
-			c.Header("WWW-Authenticate", "Bearer")
-			response.RespondUnauthorized(c, "unauthorized")
+			cookieToken, err := c.Cookie("access_token")
+			if err != nil || strings.TrimSpace(cookieToken) == "" {
+				c.Header("WWW-Authenticate", "Bearer")
+				response.RespondUnauthorized(c, "unauthorized")
+				c.Abort()
+				return
+			}
+			token = cookieToken
+		}
+
+		if secretProvider == nil {
+			response.RespondServiceUnavailable(c, "authentication temporarily unavailable")
 			c.Abort()
 			return
 		}
 
-		claims, err := security.Parse(token, secret)
-		if err != nil {
-			if errors.Is(err, security.ErrEmptySecret) {
+		candidates, err := secretProvider.GetCandidates(security.SecretFamilyAccess)
+		if err != nil || len(candidates) == 0 {
+			response.RespondServiceUnavailable(c, "authentication temporarily unavailable")
+			c.Abort()
+			return
+		}
+
+		var (
+			claims      security.Claims
+			parsed      bool
+			parseErr    error
+			emptySecret bool
+		)
+		for _, candidate := range candidates {
+			claims, parseErr = security.Parse(token, candidate.Value)
+			if parseErr == nil {
+				parsed = true
+				break
+			}
+			if errors.Is(parseErr, security.ErrEmptySecret) {
+				emptySecret = true
+			}
+		}
+		if !parsed {
+			if emptySecret {
 				response.RespondServiceUnavailable(c, "authentication temporarily unavailable")
 				c.Abort()
 				return
 			}
-
 			c.Header("WWW-Authenticate", "Bearer")
 			response.RespondUnauthorized(c, "unauthorized")
 			c.Abort()
 			return
 		}
 
-		if blacklist != nil && blacklist.IsBlacklisted(c.Request.Context(), claims.TokenID) {
+		blacklisted, blacklistErr := IsBlacklisted(c.Request.Context(), redisClient, claims.TokenID)
+		if blacklistErr != nil {
+			logger.HandlerWarn(c, "iam.access", blacklistErr, "redis blacklist check failed; fallback allow")
+		}
+		if blacklisted {
 			logger.HandlerWarn(c, "iam.access", nil, "token is blacklisted")
 			c.Header("WWW-Authenticate", "Bearer")
 			response.RespondUnauthorized(c, "token has been revoked")
@@ -70,6 +118,8 @@ func Access(secret string, blacklist TokenBlacklist) gin.HandlerFunc {
 		c.Set(CtxKeyJTI, claims.TokenID)
 		c.Set(CtxKeyStatus, claims.Status)
 		c.Set(CtxKeyLevel, claims.Level) // int — read directly by RequireLevel
+		c.Set(CtxKeyDeviceID, claims.DeviceID)
+		c.Set(CtxKeyTenant, claims.TenantID)
 
 		// Piggyback on logger key so request logs include user_id automatically.
 		if claims.Subject != "" {
@@ -80,22 +130,40 @@ func Access(secret string, blacklist TokenBlacklist) gin.HandlerFunc {
 	}
 }
 
-// JWTClaims returns the full parsed JWT claims from the gin context.
-// Prefer c.GetString(middleware.CtxKeyUserID) for simple identity lookups.
-func JWTClaims(c *gin.Context) (security.Claims, bool) {
-	if c == nil {
-		return security.Claims{}, false
-	}
-
-	v, ok := c.Get(jwtClaimsContextKey)
+func GetUserID(c *gin.Context) string {
+	v, ok := c.Get(CtxKeyUserID)
 	if !ok {
-		return security.Claims{}, false
+		return ""
 	}
+	s, _ := v.(string)
+	return s
+}
 
-	claims, ok := v.(security.Claims)
+func GetDeviceID(c *gin.Context) string {
+	v, ok := c.Get(CtxKeyDeviceID)
 	if !ok {
-		return security.Claims{}, false
+		return ""
+	}
+	s, _ := v.(string)
+	return s
+}
+
+// IsBlacklisted checks if the JTI is blacklisted in Redis.
+func IsBlacklisted(ctx context.Context, rdb *redis.Client, jti string) (bool, error) {
+	if jti == "" || rdb == nil {
+		return false, nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	return claims, true
+	checkCtx, cancel := context.WithTimeout(ctx, 75*time.Millisecond)
+	defer cancel()
+
+	key := fmt.Sprintf("iam:blacklist:%s", jti)
+	exists, err := rdb.Exists(checkCtx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	return exists > 0, nil
 }

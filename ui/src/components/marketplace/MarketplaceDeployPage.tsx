@@ -286,7 +286,7 @@ export default function MarketplaceDeployPage() {
         kind: "success",
         message: `${form.name.trim()} queued for deployment in ${selectedNamespace?.display_name ?? "the selected namespace"}.`,
       });
-      router.push("/workspace/marketplace");
+      router.push("/marketplace");
     } catch (error) {
       pushToast({
         kind: "error",
@@ -346,7 +346,7 @@ export default function MarketplaceDeployPage() {
               Deploy package
             </h1>
             <p className="text-sm leading-7 text-gray-500 dark:text-gray-400">{loadError}</p>
-            <Button className="rounded-xl px-5" onClick={() => router.push("/workspace/marketplace")}>
+            <Button className="rounded-xl px-5" onClick={() => router.push("/marketplace")}>
               Back to marketplace
             </Button>
           </div>
@@ -656,7 +656,7 @@ export default function MarketplaceDeployPage() {
             <Button
               variant="outline"
               className="w-full justify-center rounded-xl"
-              onClick={() => router.push("/workspace/marketplace")}
+              onClick={() => router.push("/marketplace")}
             >
               Cancel
             </Button>

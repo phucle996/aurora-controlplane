@@ -5,20 +5,30 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import PageBreadcrumb from "@/components/common/PageBreadCrumb";
 import { tabs } from "@/components/smtp/data";
+import {
+  SMTPWorkspaceProvider,
+} from "@/components/smtp/SMTPWorkspaceProvider";
 
 export function SMTPPageShell({ children }: { children: ReactNode }) {
+  return (
+    <SMTPWorkspaceProvider>
+      <SMTPPageChrome>{children}</SMTPPageChrome>
+    </SMTPWorkspaceProvider>
+  );
+}
+
+function SMTPPageChrome({ children }: { children: ReactNode }) {
   const pathname = usePathname();
 
   return (
     <div className="space-y-6">
       <PageBreadcrumb pageTitle="SMTP" />
+
       <section className="border-b border-gray-200 dark:border-gray-800">
         <div className="flex flex-col gap-2 md:flex-row md:items-end md:gap-8">
           {tabs.map((tab) => {
             const active =
-              tab.href === "/smtp"
-                ? pathname === "/smtp"
-                : pathname.startsWith(tab.href);
+              tab.href === "/smtp" ? pathname === "/smtp" : pathname.startsWith(tab.href);
 
             return (
               <Link
@@ -30,9 +40,7 @@ export function SMTPPageShell({ children }: { children: ReactNode }) {
                     : "text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-white/80"
                 }`}
               >
-                <span className="block text-sm font-semibold tracking-tight">
-                  {tab.label}
-                </span>
+                <span className="block text-sm font-semibold tracking-tight">{tab.label}</span>
                 <span className="mt-1 block text-xs text-gray-400 dark:text-gray-500">
                   {tab.caption}
                 </span>
@@ -46,6 +54,7 @@ export function SMTPPageShell({ children }: { children: ReactNode }) {
           })}
         </div>
       </section>
+
       {children}
     </div>
   );

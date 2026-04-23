@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import React from "react";
+import React, { Suspense } from "react";
 import NewConsumerForm from "@/components/smtp/NewConsumerForm";
 
 export const metadata: Metadata = {
@@ -8,5 +8,9 @@ export const metadata: Metadata = {
 };
 
 export default function NewSMTPConsumerPage() {
-  return <NewConsumerForm />;
+  return (
+    <Suspense fallback={null}>
+      <NewConsumerForm />
+    </Suspense>
+  );
 }

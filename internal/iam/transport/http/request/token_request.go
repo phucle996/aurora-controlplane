@@ -4,19 +4,29 @@ package iam_reqdto
 //
 // The client MUST sign the canonical payload:
 //
-//	SHA256( refresh_token + "." + device_id + "." + nonce + "." + timestamp_unix )
+//	jti + "\n" + iat + "\n" + htm + "\n" + htu + "\n" + token_hash + "\n" + device_id
 //
 // with its device private key and base64-raw-url encode the resulting bytes
 // as the `signature` field.
 type RefreshTokenRequest struct {
-	// Nonce is a client-chosen random string (min 16 chars) to defeat replays.
-	Nonce string `json:"nonce" binding:"required,min=16"`
+	// JTI is the proof identifier for replay detection.
+	JTI string `json:"jti" binding:"required"`
 
-	// TimestampUnix is Unix epoch seconds at signing time.
-	// Must be within ±5 minutes of server time.
-	TimestampUnix int64 `json:"timestamp" binding:"required"`
+	// IssuedAt is the Unix epoch seconds at which the proof was signed.
+	IssuedAt int64 `json:"iat" binding:"required"`
 
-	// Signature is the base64-raw-url encoded device signature over
-	// the canonical payload.
+	// HTM is the HTTP method that was signed.
+	HTM string `json:"htm" binding:"required"`
+
+	// HTU is the absolute refresh endpoint URL that was signed.
+	HTU string `json:"htu" binding:"required"`
+
+	// TokenHash is the readable refresh-token hash companion cookie value.
+	TokenHash string `json:"token_hash" binding:"required"`
+
+	// DeviceID is the readable device-id companion cookie value.
+	DeviceID string `json:"device_id" binding:"required"`
+
+	// Signature is required for refresh rotation.
 	Signature string `json:"signature" binding:"required"`
 }

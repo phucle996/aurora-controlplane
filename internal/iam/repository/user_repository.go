@@ -345,6 +345,79 @@ func (r *UserRepository) GetProfileByUserID(ctx context.Context, userID string) 
 	return iam_model.UserProfileModelToEntity(&row), nil
 }
 
+// GetWhoAmI returns the flattened authenticated session view for UI bootstrap.
+func (r *UserRepository) GetWhoAmI(ctx context.Context, userID string) (*entity.WhoAmI, error) {
+	if r == nil || r.db == nil {
+		return nil, iam_errorx.ErrUserNotFound
+	}
+
+	var (
+		result entity.WhoAmI
+		roles  []string
+		perms  []string
+	)
+
+	err := r.db.QueryRow(ctx, `
+		SELECT
+			u.id AS user_id,
+			u.username,
+			u.email,
+			COALESCE(u.phone, '') AS phone,
+			u.security_level,
+			u.status,
+			COALESCE(p.fullname, '') AS fullname,
+			COALESCE(p.avatar_url, '') AS avatar_url,
+			COALESCE(p.bio, '') AS bio,
+			COALESCE(
+				ARRAY_AGG(DISTINCT r.name ORDER BY r.name)
+				FILTER (WHERE r.name IS NOT NULL),
+				ARRAY[]::text[]
+			) AS role_names,
+			COALESCE(
+				ARRAY_AGG(
+					DISTINCT COALESCE(NULLIF(perm.name, ''), NULLIF(perm.slug, ''))
+					ORDER BY COALESCE(NULLIF(perm.name, ''), NULLIF(perm.slug, ''))
+				)
+				FILTER (WHERE COALESCE(NULLIF(perm.name, ''), NULLIF(perm.slug, '')) IS NOT NULL),
+				ARRAY[]::text[]
+			) AS permission_names
+		FROM iam.users u
+		JOIN iam.user_profiles p ON p.user_id = u.id
+		LEFT JOIN iam.user_roles ur ON ur.user_id = u.id
+		LEFT JOIN iam.roles r ON r.id = ur.role_id
+		LEFT JOIN iam.role_permissions rp ON rp.role_id = r.id
+		LEFT JOIN iam.permissions perm ON perm.id = rp.permission_id
+		WHERE u.id = $1
+		GROUP BY
+			u.id, u.username, u.email, u.phone, u.security_level, u.status,
+			p.fullname, p.avatar_url, p.bio`, userID).Scan(
+		&result.UserID,
+		&result.Username,
+		&result.Email,
+		&result.Phone,
+		&result.Level,
+		&result.Status,
+		&result.FullName,
+		&result.AvatarURL,
+		&result.Bio,
+		&roles,
+		&perms,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, iam_errorx.ErrUserNotFound
+		}
+		return nil, fmt.Errorf("iam repo: get whoami: %w", err)
+	}
+
+	result.OnBoarding = false
+	result.AuthType = "password"
+	result.Roles = append([]string(nil), roles...)
+	result.Permissions = append([]string(nil), perms...)
+
+	return &result, nil
+}
+
 // CreateRefreshToken persists a hashed refresh token.
 func (r *UserRepository) CreateRefreshToken(ctx context.Context, token *entity.RefreshToken) error {
 	if r == nil || r.db == nil {

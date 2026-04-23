@@ -1,12 +1,11 @@
 import type { Metadata } from "next";
-import React from "react";
-import NewLaneForm from "@/components/smtp/NewLaneForm";
+import { redirect } from "next/navigation";
 
 export const metadata: Metadata = {
-  title: "New Lane | SMTP | Aurora Control Plane",
-  description: "Create a new SMTP delivery lane",
+  title: "New Gateway | SMTP | Aurora Control Plane",
+  description: "Create a new SMTP gateway",
 };
 
 export default function NewSMTPLanePage() {
-  return <NewLaneForm />;
+  redirect("/smtp/gateways/new");
 }

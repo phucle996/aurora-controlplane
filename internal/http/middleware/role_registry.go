@@ -12,12 +12,14 @@ const defaultRoleTTL = 15 * time.Minute
 // Level semantics:
 //
 //	0  = highest privilege (e.g. super-admin)
-//	N  = lower privilege the further from 0 (e.g. user = 100)
+//	N  = lower privilege the further from 0 (e.g. user = 4)
 //
 // RequireLevel(minLevel) passes when role.Level <= minLevel.
 type RoleEntry struct {
 	Level       int
 	Permissions []string // flat list, e.g. ["iam:read", "iam:write"]
+	// permissionLookup is precomputed once at cache-set time to keep hot-path checks O(1).
+	permissionLookup map[string]struct{}
 }
 
 // cachedRoleEntry wraps RoleEntry with an expiry timestamp.
@@ -58,6 +60,7 @@ func (r *RoleRegistry) Set(role string, entry RoleEntry) {
 
 // SetWithTTL caches a RoleEntry with an explicit TTL.
 func (r *RoleRegistry) SetWithTTL(role string, entry RoleEntry, ttl time.Duration) {
+	entry = normalizeRoleEntry(entry)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.roles[role] = &cachedRoleEntry{
@@ -103,4 +106,19 @@ func (r *RoleRegistry) EvictExpired() {
 			delete(r.roles, role)
 		}
 	}
+}
+
+func normalizeRoleEntry(entry RoleEntry) RoleEntry {
+	if len(entry.Permissions) == 0 {
+		entry.Permissions = []string{}
+		entry.permissionLookup = map[string]struct{}{}
+		return entry
+	}
+
+	lookup := make(map[string]struct{}, len(entry.Permissions))
+	for _, permission := range entry.Permissions {
+		lookup[permission] = struct{}{}
+	}
+	entry.permissionLookup = lookup
+	return entry
 }

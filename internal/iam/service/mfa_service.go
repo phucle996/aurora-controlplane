@@ -1,4 +1,4 @@
-package service
+package iam_service
 
 import (
 	"context"
@@ -181,6 +181,10 @@ func (s *MfaService) Verify(ctx context.Context, challengeID, method, code strin
 // ── Enrollment ────────────────────────────────────────────────────────────────
 
 func (s *MfaService) EnrollTOTP(ctx context.Context, userID, deviceName string) (string, string, error) {
+	if s == nil || s.cfg == nil || s.userRepo == nil || s.mfaRepo == nil {
+		return "", "", fmt.Errorf("mfa svc: configuration is nil")
+	}
+
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
 		return "", "", fmt.Errorf("mfa svc: get user: %w", err)
@@ -196,14 +200,18 @@ func (s *MfaService) EnrollTOTP(ctx context.Context, userID, deviceName string) 
 		return "", "", fmt.Errorf("mfa svc: gen id: %w", err)
 	}
 
-	// TODO(prod): encrypt result.Secret with AES-GCM before storing.
+	encryptedSecret, err := security.EncryptSecret(result.Secret, s.cfg.Security.MasterKey)
+	if err != nil {
+		return "", "", fmt.Errorf("mfa svc: encrypt totp secret: %w", err)
+	}
+
 	setting := &entity.MfaSetting{
 		ID:              settingID,
 		UserID:          userID,
 		MfaType:         entity.MfaTypeTOTP,
 		DeviceName:      deviceName,
 		IsPrimary:       false,
-		SecretEncrypted: result.Secret,
+		SecretEncrypted: encryptedSecret,
 		IsEnabled:       false, // enabled only after ConfirmTOTP
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
@@ -217,6 +225,10 @@ func (s *MfaService) EnrollTOTP(ctx context.Context, userID, deviceName string) 
 }
 
 func (s *MfaService) ConfirmTOTP(ctx context.Context, userID, settingID, code string) error {
+	if s == nil || s.cfg == nil || s.mfaRepo == nil {
+		return fmt.Errorf("mfa svc: configuration is nil")
+	}
+
 	setting, err := s.mfaRepo.GetByID(ctx, settingID)
 	if err != nil {
 		return err
@@ -225,7 +237,12 @@ func (s *MfaService) ConfirmTOTP(ctx context.Context, userID, settingID, code st
 		return iam_errorx.ErrMfaSettingNotFound
 	}
 
-	if !security.ValidateTOTP(code, setting.SecretEncrypted) {
+	secret, err := s.decryptTOTPSecret(setting.SecretEncrypted)
+	if err != nil {
+		return err
+	}
+
+	if !security.ValidateTOTP(code, secret) {
 		return iam_errorx.ErrMfaCodeInvalid
 	}
 
@@ -405,7 +422,13 @@ func (s *MfaService) verifyTOTP(ctx context.Context, userID, code string) error 
 	if err != nil {
 		return iam_errorx.ErrMfaCodeInvalid
 	}
-	if !security.ValidateTOTP(code, setting.SecretEncrypted) {
+
+	secret, err := s.decryptTOTPSecret(setting.SecretEncrypted)
+	if err != nil {
+		return err
+	}
+
+	if !security.ValidateTOTP(code, secret) {
 		return iam_errorx.ErrMfaCodeInvalid
 	}
 	return nil
@@ -429,4 +452,17 @@ func (s *MfaService) verifyRecovery(ctx context.Context, userID, code string) er
 		return iam_errorx.ErrMfaCodeInvalid
 	}
 	return s.mfaRepo.MarkRecoveryCodeUsed(ctx, rc.ID)
+}
+
+func (s *MfaService) decryptTOTPSecret(cipherText string) (string, error) {
+	if s == nil || s.cfg == nil {
+		return "", fmt.Errorf("mfa svc: configuration is nil")
+	}
+
+	secret, err := security.DecryptSecret(cipherText, s.cfg.Security.MasterKey)
+	if err != nil {
+		return "", fmt.Errorf("mfa svc: decrypt totp secret: %w", err)
+	}
+
+	return secret, nil
 }

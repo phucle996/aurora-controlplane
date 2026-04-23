@@ -4,7 +4,7 @@ import { useState } from "react";
 import { SMTPPageShell } from "@/components/smtp/SMTPPageShell";
 import { GeneralTab } from "@/components/smtp/GeneralTab";
 import { ConsumerTab } from "@/components/smtp/ConsumerTab";
-import { LaneTab } from "@/components/smtp/LaneTab";
+import { GatewayTab } from "@/components/smtp/GatewayTab";
 import { EndpointTab } from "@/components/smtp/EndpointTab";
 import { TemplateTab } from "@/components/smtp/TemplateTab";
 
@@ -42,10 +42,10 @@ export function SMTPTemplatesPage() {
   );
 }
 
-export function SMTPLanesPage() {
+export function SMTPGatewaysPage() {
   return (
     <SMTPPageShell>
-      <LaneTab />
+      <GatewayTab />
     </SMTPPageShell>
   );
 }

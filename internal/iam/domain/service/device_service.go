@@ -12,8 +12,9 @@ import (
 type DeviceService interface {
 	// ── Core (called by AuthService) ─────────────────────────────────────────
 
-	// ResolveDevice gets or creates a device by fingerprint and refreshes its activity.
-	ResolveDevice(ctx context.Context, userID, fingerprint, keyAlgorithm string) (*entity.Device, error)
+	// ResolveDevice gets or creates a device by fingerprint, binds its key if needed,
+	// and refreshes its activity.
+	ResolveDevice(ctx context.Context, userID, fingerprint, publicKey, keyAlgorithm string) (*entity.Device, error)
 
 	// UpdateActivity stamps last_active_at for an already-resolved device.
 	UpdateActivity(ctx context.Context, deviceID string) error
@@ -30,7 +31,7 @@ type DeviceService interface {
 	RotateKey(ctx context.Context, userID, deviceID, newPublicKey, newAlgorithm string) error
 
 	// Rebind re-attaches a device to a new key pair, requires prior proof.
-	Rebind(ctx context.Context, userID, deviceID, newPublicKey, newAlgorithm string) error
+	Rebind(ctx context.Context, userID string, proof *entity.DeviceProof) error
 
 	// Revoke revokes a single device owned by userID and kills its tokens.
 	Revoke(ctx context.Context, userID, deviceID string) error
@@ -45,9 +46,6 @@ type DeviceService interface {
 
 	// ListByUserID returns all devices registered for a user.
 	ListByUserID(ctx context.Context, userID string) ([]*entity.Device, error)
-
-	// Rename updates the human-readable name of a device.
-	Rename(ctx context.Context, userID, deviceID, name string) error
 
 	// RevokeOne revokes exactly one device belonging to the caller.
 	RevokeOne(ctx context.Context, userID, deviceID string) error

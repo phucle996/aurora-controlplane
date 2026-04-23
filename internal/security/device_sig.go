@@ -29,6 +29,43 @@ const (
 	AlgECDSAP256 = "ecdsa-p256"
 )
 
+// NormalizeDeviceKeyAlgorithm maps aliases and legacy values to a canonical form.
+// ES256 is treated as ECDSA P-256 for backwards compatibility.
+func NormalizeDeviceKeyAlgorithm(keyAlgorithm string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(keyAlgorithm)) {
+	case "", "es256", AlgECDSAP256, "p-256":
+		return AlgECDSAP256, nil
+	case AlgEd25519:
+		return AlgEd25519, nil
+	default:
+		return "", ErrUnsupportedKeyAlgorithm
+	}
+}
+
+// ValidateDevicePublicKey ensures the PEM public key matches the declared algorithm.
+// It returns the canonical key algorithm that should be stored.
+func ValidateDevicePublicKey(pemPublicKey, keyAlgorithm string) (string, error) {
+	normalizedAlg, err := NormalizeDeviceKeyAlgorithm(keyAlgorithm)
+	if err != nil {
+		return "", err
+	}
+
+	switch normalizedAlg {
+	case AlgEd25519:
+		if _, err := parseEd25519PEM(pemPublicKey); err != nil {
+			return "", err
+		}
+	case AlgECDSAP256:
+		if _, err := parseECDSAP256PEM(pemPublicKey); err != nil {
+			return "", err
+		}
+	default:
+		return "", ErrUnsupportedKeyAlgorithm
+	}
+
+	return normalizedAlg, nil
+}
+
 // VerifyDeviceSignature verifies that `signature` (base64-raw-url encoded) over
 // `payload` was produced by the private key corresponding to `pemPublicKey`.
 //
@@ -42,7 +79,12 @@ func VerifyDeviceSignature(pemPublicKey, keyAlgorithm, payload, signatureB64 str
 
 	payloadDigest := sha256.Sum256([]byte(payload))
 
-	switch strings.ToLower(strings.TrimSpace(keyAlgorithm)) {
+	normalizedAlg, err := NormalizeDeviceKeyAlgorithm(keyAlgorithm)
+	if err != nil {
+		return ErrUnsupportedKeyAlgorithm
+	}
+
+	switch normalizedAlg {
 	case AlgEd25519:
 		return verifyEd25519(pemPublicKey, payloadDigest[:], sigBytes)
 	case AlgECDSAP256:
@@ -52,12 +94,26 @@ func VerifyDeviceSignature(pemPublicKey, keyAlgorithm, payload, signatureB64 str
 	}
 }
 
+// HashRefreshToken returns the companion-cookie hash exposed to browser JS.
+// The value is a raw-url-safe SHA-256 digest of the refresh token string.
+func HashRefreshToken(rawRefreshToken string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(rawRefreshToken)))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
 // CanonicalRefreshPayload builds the deterministic string that the client must
 // sign when requesting a token rotation.
 //
-//	payload = refresh_token + "." + device_id + "." + nonce + "." + timestamp_unix
-func CanonicalRefreshPayload(rawToken, deviceID, nonce string, timestampUnix int64) string {
-	return fmt.Sprintf("%s.%s.%s.%d", rawToken, deviceID, nonce, timestampUnix)
+//	payload = jti + "\n" + iat + "\n" + htm + "\n" + htu + "\n" + token_hash + "\n" + device_id
+func CanonicalRefreshPayload(jti string, issuedAt int64, htm, htu, tokenHash, deviceID string) string {
+	return strings.Join([]string{
+		strings.TrimSpace(jti),
+		fmt.Sprintf("%d", issuedAt),
+		strings.ToUpper(strings.TrimSpace(htm)),
+		strings.TrimSpace(htu),
+		strings.TrimSpace(tokenHash),
+		strings.TrimSpace(deviceID),
+	}, "\n")
 }
 
 // ── internal verifiers ─────────────────────────────────────────────────────────

@@ -4,8 +4,6 @@ import (
 	"os"
 	"time"
 
-	"controlplane/internal/config"
-
 	"github.com/gin-gonic/gin"
 	"github.com/sirupsen/logrus"
 )
@@ -28,18 +26,14 @@ var log *logrus.Logger
 
 // InitLogger initializes the global logger from config.
 // Output: JSON, timestamp RFC3339Nano UTC, output os.Stderr.
-func InitLogger(cfg *config.AppCfg) {
+func InitLogger() {
 	log = logrus.New()
 	log.SetOutput(os.Stderr)
 	log.SetFormatter(&logrus.JSONFormatter{
 		TimestampFormat: time.RFC3339Nano,
 	})
 
-	lvl, err := logrus.ParseLevel(cfg.LogLV)
-	if err != nil {
-		lvl = logrus.InfoLevel
-	}
-	log.SetLevel(lvl)
+	log.SetLevel(logrus.InfoLevel)
 }
 
 // L returns the global logrus logger (for non-request contexts like startup).
@@ -79,7 +73,7 @@ func userID(c *gin.Context) string {
 
 // AccessLog emits a structured access log entry (log_type=access, event=completed).
 func AccessLog(c *gin.Context, op, message, errorCode, method, route string, statusCode int, latencyMs float64, clientIP string) {
-	log.WithFields(logrus.Fields{
+	L().WithFields(logrus.Fields{
 		"log_type":    LogTypeAccess,
 		"request_id":  requestID(c),
 		"op":          op,
@@ -98,7 +92,7 @@ func AccessLog(c *gin.Context, op, message, errorCode, method, route string, sta
 
 // HandlerInfo emits a handler-level info log.
 func HandlerInfo(c *gin.Context, op, message string) {
-	log.WithFields(logrus.Fields{
+	L().WithFields(logrus.Fields{
 		"log_type":   LogTypeHandler,
 		"request_id": requestID(c),
 		"user_id":    userID(c),
@@ -117,7 +111,7 @@ func HandlerWarn(c *gin.Context, op string, err error, message string) {
 	if err != nil {
 		fields["error"] = err.Error()
 	}
-	log.WithFields(fields).Warn(message)
+	L().WithFields(fields).Warn(message)
 }
 
 // HandlerError emits a handler-level error log.
@@ -131,13 +125,14 @@ func HandlerError(c *gin.Context, op string, err error) {
 	if err != nil {
 		fields["error"] = err.Error()
 	}
+	L().WithFields(fields).Error("handler error")
 }
 
 // --- System Log (startup, shutdown, infra — no gin context) ---
 
 // SysInfo emits a system-level info log.
 func SysInfo(op, message string) {
-	log.WithFields(logrus.Fields{
+	L().WithFields(logrus.Fields{
 		"log_type": LogTypeSystem,
 		"op":       op,
 		"message":  message,
@@ -146,7 +141,7 @@ func SysInfo(op, message string) {
 
 // SysWarn emits a system-level warn log.
 func SysWarn(op, message string) {
-	log.WithFields(logrus.Fields{
+	L().WithFields(logrus.Fields{
 		"log_type": LogTypeSystem,
 		"op":       op,
 		"message":  message,
@@ -155,7 +150,7 @@ func SysWarn(op, message string) {
 
 // SysError emits a system-level error log.
 func SysError(op, message string) {
-	log.WithFields(logrus.Fields{
+	L().WithFields(logrus.Fields{
 		"log_type": LogTypeSystem,
 		"op":       op,
 		"message":  message,
@@ -164,7 +159,7 @@ func SysError(op, message string) {
 
 // SysFatal emits a system-level fatal log and exits.
 func SysFatal(op, message string) {
-	log.WithFields(logrus.Fields{
+	L().WithFields(logrus.Fields{
 		"log_type": LogTypeSystem,
 		"op":       op,
 		"message":  message,

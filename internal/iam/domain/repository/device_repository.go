@@ -18,7 +18,6 @@ type DeviceRepository interface {
 
 	// ── User self-service ─────────────────────────────────────────────────────
 	ListDevicesByUserID(ctx context.Context, userID string) ([]*entity.Device, error)
-	RenameDevice(ctx context.Context, deviceID, userID, name string) error
 	DeleteDevice(ctx context.Context, deviceID string) error
 	RevokeOtherDevices(ctx context.Context, userID, keepDeviceID string) (int64, error)
 
