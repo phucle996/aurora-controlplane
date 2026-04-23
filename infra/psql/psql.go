@@ -3,7 +3,6 @@ package psql
 import (
 	"context"
 	"controlplane/internal/config"
-	"controlplane/pkg/logger"
 	"fmt"
 	"strings"
 	"time"
@@ -31,7 +30,6 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 	for attempt := 1; attempt <= cfg.MaxRetries; attempt++ {
 		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
-			logger.SysWarn("infra.psql", fmt.Sprintf("psql: connection attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err))
 			if attempt < cfg.MaxRetries {
 				time.Sleep(cfg.RetryInterval)
 			}
@@ -43,7 +41,6 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 		pingCancel()
 
 		if err != nil {
-			logger.SysWarn("infra.psql", fmt.Sprintf("psql: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, err))
 			pool.Close()
 			if attempt < cfg.MaxRetries {
 				time.Sleep(cfg.RetryInterval)
@@ -51,7 +48,6 @@ func NewPostgres(ctx context.Context, cfg *config.PsqlCfg) (*pgxpool.Pool, error
 			continue
 		}
 
-		logger.SysInfo("infra.psql", fmt.Sprintf("psql: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
 		return pool, nil
 	}
 

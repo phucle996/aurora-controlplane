@@ -3,7 +3,6 @@ package victoriadb
 import (
 	"context"
 	"controlplane/internal/config"
-	"controlplane/pkg/logger"
 	"fmt"
 	"io"
 	"net/http"
@@ -46,11 +45,8 @@ func NewVictoriaDB(ctx context.Context, cfg *config.VictoriaDBCfg) (*Client, err
 		pingCancel()
 
 		if lastErr == nil {
-			logger.SysInfo("infra.victoriadb", fmt.Sprintf("victoriadb: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
 			return client, nil
 		}
-
-		logger.SysWarn("infra.victoriadb", fmt.Sprintf("victoriadb: health check attempt %d/%d failed: %v", attempt, cfg.MaxRetries, lastErr))
 
 		if attempt < cfg.MaxRetries {
 			time.Sleep(cfg.RetryInterval)

@@ -42,7 +42,7 @@ func RegisterFrontend(r *gin.Engine) error {
 
 	r.Use(func(c *gin.Context) {
 		// Ignore API and health check paths
-		if strings.HasPrefix(c.Request.URL.Path, "/api") || c.Request.URL.Path == "/" {
+		if isBackendPath(c.Request.URL.Path) || c.Request.URL.Path == "/" {
 			c.Next()
 			return
 		}
@@ -58,8 +58,8 @@ func RegisterFrontend(r *gin.Engine) error {
 
 	// SPA Fallback NoRoute Hook
 	r.NoRoute(func(c *gin.Context) {
-		// Don't intercept API 404s
-		if strings.HasPrefix(c.Request.URL.Path, "/api") {
+		// Don't intercept backend 404s
+		if isBackendPath(c.Request.URL.Path) {
 			c.JSON(http.StatusNotFound, gin.H{"error": "route not found"})
 			return
 		}
@@ -74,6 +74,10 @@ func RegisterFrontend(r *gin.Engine) error {
 	})
 
 	return nil
+}
+
+func isBackendPath(path string) bool {
+	return strings.HasPrefix(path, "/api") || strings.HasPrefix(path, "/admin")
 }
 
 func serveExportedAsset(c *gin.Context, distFS fs.FS, fsHandler http.Handler) bool {

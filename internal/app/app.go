@@ -18,15 +18,13 @@ type App struct {
 	cancel     context.CancelFunc
 	cfg        *config.Config
 	infra      *bootstrap.Infra
-	runtime    *bootstrap.Runtime
 	health     *handler.HealthHandler
 	httpServer *http.Server
 	grpc       *bootstrap.GRPC
+	modules    *GlobalModules
 }
 
 func NewApplication(cfg *config.Config) (*App, error) {
-	logger.SysInfo("app", "Initializing application...")
-
 	// Create context
 	ctx, cancel := context.WithCancel(context.Background())
 
@@ -38,7 +36,7 @@ func NewApplication(cfg *config.Config) (*App, error) {
 	}
 
 	// Run migrations
-	if err := bootstrap.RunMigrations(ctx, cfg); err != nil {
+	if err := bootstrap.RunMigrations(ctx, infra.DB); err != nil {
 		cancel()
 		return nil, err
 	}
@@ -49,33 +47,8 @@ func NewApplication(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	// Init runtime
-	rt, err := bootstrap.InitRuntime(ctx, cfg, infra)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
-
-	// Build modules
-	if err := globalModules(ctx, cfg, infra, rt); err != nil {
-		cancel()
-		return nil, err
-	}
-
 	// Init HealthHandler
 	health := handler.NewHealthHandler(infra.DB, infra.Redis.Unwrap())
-
-	// Init Gin engine and register routes
-	gin.SetMode(gin.ReleaseMode)
-	engine := gin.New()
-	engine.Use(gin.Recovery(), middleware.AccessLog(), middleware.RequestID())
-
-	RegisterRoutes(engine, cfg, rt, health)
-
-	httpSrv := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.App.HTTPPort),
-		Handler: engine,
-	}
 
 	// Init gRPC (server + client manager)
 	g, err := bootstrap.InitGRPC(ctx, cfg)
@@ -84,32 +57,57 @@ func NewApplication(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
+	// Init Gin engine and register routes
+	gin.SetMode(gin.ReleaseMode)
+	engine := gin.New()
+	engine.Use(
+		gin.Recovery(),
+		middleware.AccessLog(),
+		middleware.RequestID(),
+	)
+
+	// Build modules
+	m, err := globalModules(cfg, infra, g)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+
+	// Initialize middlewares that require dependencies.
+	middleware.Init(m.Core.SecretService, infra.Redis.Unwrap())
+	middleware.InitAuthz(m.IAM.Registry, m.IAM.RbacService.LoadRole)
+	middleware.InitAdminToken(m.IAM.AdminAPITokenService.Validate)
+
+	RegisterRoutes(engine, cfg, health, m)
+
+	httpSrv := &http.Server{
+		Addr:    fmt.Sprintf(":%d", cfg.App.HTTPPort),
+		Handler: engine,
+	}
+
 	return &App{
 		ctx:        ctx,
 		cancel:     cancel,
 		cfg:        cfg,
 		infra:      infra,
-		runtime:    rt,
 		health:     health,
 		httpServer: httpSrv,
 		grpc:       g,
+		modules:    m,
 	}, nil
 }
 
 func (a *App) Start(cfg *config.Config) error {
-	logger.SysInfo("app", "Starting application components...")
-
-	// Start runtime
-	if err := a.runtime.Start(); err != nil {
-		return err
-	}
-
 	// Start gRPC server
 	go func() {
 		if err := a.grpc.Start(); err != nil {
 			logger.SysError("app", fmt.Sprintf("gRPC server stopped: %v", err))
 		}
 	}()
+
+	if a.modules != nil && a.modules.SMTP != nil {
+		a.modules.SMTP.Start()
+	}
 
 	// Start HTTP server
 	go func() {
@@ -126,11 +124,8 @@ func (a *App) Start(cfg *config.Config) error {
 }
 
 func (a *App) Stop() {
-	logger.SysInfo("app", "Stopping application gracefully...")
-
 	// 1. Mark as not ready to drain incoming traffic from load balancers
 	a.health.MarkNotReady()
-	logger.SysInfo("app", "Application marked as not ready (draining traffic)")
 
 	// Optional: add a small sleep here if deployed behind a cloud load balancer (e.g. AWS ALB)
 	// to allow time for the unregistered target state to propagate.
@@ -143,8 +138,9 @@ func (a *App) Stop() {
 	// Stop gRPC (server + close all client connections)
 	a.grpc.Stop()
 
-	// Stop runtime
-	a.runtime.Stop()
+	if a.modules != nil && a.modules.IAM != nil {
+		a.modules.IAM.Stop()
+	}
 
 	// Cancel root context
 	a.cancel()

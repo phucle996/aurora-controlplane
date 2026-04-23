@@ -17,18 +17,15 @@ func main() {
 
 	// 2. apply process-wide settings
 	loc, err := time.LoadLocation(cfg.App.TimeZone)
-	if err == nil {
-		time.Local = loc
-	} else {
-		// Logger is not initialized yet, but we can call logger.SysWarn via fallback L() or just initialize logger first.
-	}
-
-	// initialize custom logger
-	logger.InitLogger(&cfg.App)
 
 	if err != nil {
-		logger.SysWarn("main", "Failed to load timezone "+cfg.App.TimeZone+": "+err.Error())
+		logger.SysWarn("main", "Failed to load timezone from environment variable "+cfg.App.TimeZone+": "+err.Error())
+		time.Local = time.UTC
+	} else {
+		time.Local = loc
 	}
+	// initialize custom logger
+	logger.InitLogger()
 
 	// 3. create application
 	application, err := app.NewApplication(cfg)

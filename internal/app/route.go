@@ -1,34 +1,39 @@
 package app
 
 import (
-	"controlplane/internal/app/bootstrap"
 	"controlplane/internal/config"
+	"controlplane/internal/core"
 	"controlplane/internal/http/handler"
-	"controlplane/internal/http/middleware"
-	iam "controlplane/internal/iam"
+	"controlplane/internal/iam"
+	"controlplane/internal/smtp"
+	"controlplane/internal/virtualmachine"
 
 	"github.com/gin-gonic/gin"
 )
 
 // RegisterRoutes is the top-level HTTP route composition root.
 // Composes root route tree only — no business logic, no handler implementation.
-func RegisterRoutes(r *gin.Engine, cfg *config.Config, rt *bootstrap.Runtime, health *handler.HealthHandler) {
-	// Shared in-memory RBAC cache — passed to every module that needs authz.
-	registry := middleware.NewRoleRegistry()
+func RegisterRoutes(r *gin.Engine, cfg *config.Config,
+	health *handler.HealthHandler, m *GlobalModules) {
+	// Health endpoints
+	r.GET("/api/health/liveness", health.Liveness)
+	r.GET("/api/health/readiness", health.Readiness)
+	r.GET("/api/health/startup", health.Startup)
 
-	api := r.Group("/api")
-	{
-		// Health endpoints
-		api.GET("/health/liveness", health.Liveness)
-		api.GET("/health/readiness", health.Readiness)
-		api.GET("/health/startup", health.Startup)
+	if m.Core != nil {
+		core.RegisterRoutes(r, cfg, m.Core)
+	}
 
-		// Versioned API group
-		v1 := api.Group("/v1")
-		{
-			iamModule := iam.NewModule(cfg, rt.Infra, rt, registry)
-			iamModule.RegisterRoutes(v1, cfg)
-		}
+	if m.IAM != nil {
+		iam.RegisterRoutes(r, cfg, m.IAM)
+	}
+
+	if m.VirtualMachine != nil {
+		virtualmachine.RegisterRoutes(r, cfg, m.VirtualMachine)
+	}
+
+	if m.SMTP != nil {
+		smtp.RegisterRoutes(r, cfg, m.SMTP)
 	}
 
 	// Register Frontend SPA fallback and static files (ignoring the /api prefix)

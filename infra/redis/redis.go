@@ -3,7 +3,6 @@ package redis
 import (
 	"context"
 	"controlplane/internal/config"
-	"controlplane/pkg/logger"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -54,11 +53,9 @@ func NewRedis(ctx context.Context, cfg *config.RedisCfg) (*Client, error) {
 		pingCancel()
 
 		if lastErr == nil {
-			logger.SysInfo("infra.redis", fmt.Sprintf("redis: connected successfully (attempt %d/%d)", attempt, cfg.MaxRetries))
 			return &Client{rdb: rdb}, nil
 		}
 
-		logger.SysWarn("infra.redis", fmt.Sprintf("redis: ping attempt %d/%d failed: %v", attempt, cfg.MaxRetries, lastErr))
 		_ = rdb.Close()
 
 		if attempt < cfg.MaxRetries {

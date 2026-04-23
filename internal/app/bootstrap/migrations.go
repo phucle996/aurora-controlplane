@@ -2,109 +2,104 @@ package bootstrap
 
 import (
 	"context"
-	"controlplane/internal/config"
-	"controlplane/pkg/logger"
-	"database/sql"
-	"fmt"
-	"os"
-	"path/filepath"
+	"io/fs"
+	"sort"
 	"strings"
 
-	"github.com/golang-migrate/migrate/v4"
-	mdpg "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
-	_ "github.com/lib/pq"
+	coremigrations "controlplane/internal/core/migrations"
+	iammigrations "controlplane/internal/iam/migrations"
+	smtpmigrations "controlplane/internal/smtp/migrations"
+	vmmigrations "controlplane/internal/virtualmachine/migrations"
+	"controlplane/pkg/logger"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-func RunMigrations(ctx context.Context, cfg *config.Config) error {
-	migrationDir, err := resolveIAMMigrationDir()
-	if err != nil {
-		return err
-	}
-
-	db, err := sql.Open("postgres", buildPostgresDSN(&cfg.Psql))
-	if err != nil {
-		return fmt.Errorf("migration: failed to open sql.DB: %w", err)
-	}
-	defer db.Close()
-
-	if err := db.PingContext(ctx); err != nil {
-		return fmt.Errorf("migration: failed to ping postgres: %w", err)
-	}
-
-	driver, err := mdpg.WithInstance(db, &mdpg.Config{})
-	if err != nil {
-		return fmt.Errorf("migration: failed to instantiate postgres driver: %w", err)
-	}
-
-	sourceURL := "file://" + filepath.ToSlash(migrationDir)
-	m, err := migrate.NewWithDatabaseInstance(sourceURL, "postgres", driver)
-	if err != nil {
-		return fmt.Errorf("migration: failed to init migrate engine: %w", err)
-	}
-
-	logger.SysInfo("app.migration", fmt.Sprintf("Running IAM database migrations from %s", migrationDir))
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("migration: failed to run up: %w", err)
-	}
-
-	logger.SysInfo("app.migration", "IAM database migrations completed successfully")
-	return nil
+type migrationSource struct {
+	module string
+	files  fs.FS
 }
 
-func buildPostgresDSN(cfg *config.PsqlCfg) string {
-	dsn := fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, cfg.SSLMode,
-	)
+const (
+	migrationLockKey1 int32 = 20260422
+	migrationLockKey2 int32 = 1
+)
 
-	if !cfg.TLSEnabled {
-		return dsn
+// RunMigrations executes every embedded *.up.sql on each startup.
+// It intentionally does not store migration version/state in DB.
+// Migration scripts must be idempotent (IF NOT EXISTS / conditional ALTER).
+func RunMigrations(ctx context.Context, db *pgxpool.Pool) error {
+	if db == nil {
+		return fmt.Errorf("migration: db is nil")
 	}
 
-	sslMode := strings.TrimSpace(cfg.SSLMode)
-	if sslMode == "" || strings.EqualFold(sslMode, "disable") {
-		sslMode = "verify-full"
+	conn, err := db.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("migration: acquire lock connection: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1, $2)`, migrationLockKey1, migrationLockKey2); err != nil {
+		return fmt.Errorf("migration: acquire lock: %w", err)
+	}
+	defer func() {
+		if _, unlockErr := conn.Exec(context.Background(), `SELECT pg_advisory_unlock($1, $2)`, migrationLockKey1, migrationLockKey2); unlockErr != nil {
+			logger.SysWarn("app.migration", fmt.Sprintf("Failed to release advisory lock: %v", unlockErr))
+		}
+	}()
+
+	sources := []migrationSource{
+		{module: "core", files: coremigrations.Files},
+		{module: "virtual-machine", files: vmmigrations.Files},
+		{module: "iam", files: iammigrations.Files},
+		{module: "smtp", files: smtpmigrations.Files},
 	}
 
-	dsn = fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		cfg.Host, cfg.Port, cfg.User, cfg.Password, cfg.DBName, sslMode,
-	)
-
-	if cfg.CACertPath != "" {
-		dsn += fmt.Sprintf(" sslrootcert=%s", cfg.CACertPath)
-	}
-	if cfg.CertPath != "" {
-		dsn += fmt.Sprintf(" sslcert=%s", cfg.CertPath)
-	}
-	if cfg.KeyPath != "" {
-		dsn += fmt.Sprintf(" sslkey=%s", cfg.KeyPath)
-	}
-
-	return dsn
-}
-
-func resolveIAMMigrationDir() (string, error) {
-	candidates := []string{
-		"/etc/aurora-controlplane/migrations/iam",
-		filepath.Join("internal", "iam", "migrations"),
-		filepath.Join("aurora-controlplane", "internal", "iam", "migrations"),
-	}
-
-	if wd, err := os.Getwd(); err == nil {
-		candidates = append(candidates,
-			filepath.Join(wd, "internal", "iam", "migrations"),
-			filepath.Join(wd, "aurora-controlplane", "internal", "iam", "migrations"),
-		)
-	}
-
-	for _, candidate := range candidates {
-		info, err := os.Stat(candidate)
-		if err == nil && info.IsDir() {
-			return candidate, nil
+	for _, source := range sources {
+		if err := applyEmbeddedMigrations(ctx, conn, source); err != nil {
+			return err
 		}
 	}
 
-	return "", fmt.Errorf("migration: iam migration directory not found")
+	return nil
+}
+
+func applyEmbeddedMigrations(ctx context.Context, db *pgxpool.Conn, source migrationSource) error {
+	entries, err := fs.ReadDir(source.files, ".")
+	if err != nil {
+		return fmt.Errorf("migration: read %s embedded migrations: %w", source.module, err)
+	}
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		name := entry.Name()
+		if !strings.HasSuffix(name, ".up.sql") {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		queryBytes, err := fs.ReadFile(source.files, name)
+		if err != nil {
+			return fmt.Errorf("migration: read %s/%s: %w", source.module, name, err)
+		}
+
+		query := string(queryBytes)
+		if strings.TrimSpace(query) == "" {
+			continue
+		}
+
+		if _, err := db.Exec(ctx, query, pgx.QueryExecModeSimpleProtocol); err != nil {
+			return fmt.Errorf("migration: apply %s/%s: %w", source.module, name, err)
+		}
+	}
+
+	return nil
 }

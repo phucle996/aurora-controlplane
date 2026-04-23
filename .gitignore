@@ -1,33 +1,70 @@
-# If you prefer the allow list template instead of the deny list, see community template:
-# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
-#
-# Binaries for programs and plugins
+# ------------------------------
+# OS / Editor
+# ------------------------------
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.tmp
+*.bak
+*.orig
+.idea/
+.vscode/
+*.iml
+
+# ------------------------------
+# Go / Build
+# ------------------------------
 *.exe
 *.exe~
 *.dll
 *.so
 *.dylib
-
-# Test binary, built with `go test -c`
 *.test
-
-# Code coverage profiles and other test artifacts
 *.out
+*.prof
+*.pprof
 coverage.*
 *.coverprofile
 profile.cov
-
-# Dependency directories (remove the comment below to include it)
-# vendor/
-
-# Go workspace file
 go.work
 go.work.sum
 
-# env file
+# Root binary output
+bin/
+
+# ------------------------------
+# Environment / Local config
+# ------------------------------
 .env
+.env.*
+!.env.example
+!.env.*.example
 .local/
 
-# Editor/IDE
-# .idea/
-# .vscode/
+# ------------------------------
+# Runtime / Logs / PIDs
+# ------------------------------
+*.log
+*.pid
+*.pid.lock
+.testinfra/
+
+# ------------------------------
+# Frontend (ui/)
+# ------------------------------
+ui/node_modules/
+ui/.next/
+ui/out/
+ui/dist/
+ui/.turbo/
+ui/.cache/
+ui/.swc/
+ui/.vercel/
+ui/npm-debug.log*
+ui/yarn-debug.log*
+ui/yarn-error.log*
+ui/pnpm-debug.log*
+
+# Embedded frontend export artifact
+internal/http/dist/

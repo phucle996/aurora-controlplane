@@ -6,6 +6,7 @@ import (
 	"controlplane/pkg/logger"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -35,7 +36,15 @@ type GRPCClientManager struct {
 // InitGRPC initializes both gRPC server and client manager.
 func InitGRPC(ctx context.Context, cfg *config.Config) (*GRPC, error) {
 	// Server
-	server := grpc.NewServer()
+	serverOptions := make([]grpc.ServerOption, 0, 1)
+	if cfg.GRPC.ServerTLSEnabled {
+		tlsConfig, err := buildGRPCServerTLSConfig(&cfg.GRPC)
+		if err != nil {
+			return nil, err
+		}
+		serverOptions = append(serverOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+	server := grpc.NewServer(serverOptions...)
 
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%s", cfg.GRPC.ServerPort))
 	if err != nil {
@@ -48,8 +57,6 @@ func InitGRPC(ctx context.Context, cfg *config.Config) (*GRPC, error) {
 		cfg:   &cfg.GRPC,
 	}
 
-	logger.SysInfo("grpc", fmt.Sprintf("grpc: server listener ready on :%s", cfg.GRPC.ServerPort))
-
 	return &GRPC{
 		Server:  server,
 		Clients: clients,
@@ -60,16 +67,13 @@ func InitGRPC(ctx context.Context, cfg *config.Config) (*GRPC, error) {
 
 // Start begins serving gRPC (blocking — run in goroutine).
 func (g *GRPC) Start() error {
-	logger.SysInfo("grpc", "grpc: server starting...")
 	return g.Server.Serve(g.lis)
 }
 
 // Stop gracefully stops the gRPC server and closes all client connections.
 func (g *GRPC) Stop() {
-	logger.SysInfo("grpc", "grpc: stopping server...")
 	g.Server.GracefulStop()
 
-	logger.SysInfo("grpc", "grpc: closing client connections...")
 	g.Clients.CloseAll()
 }
 
@@ -113,7 +117,6 @@ func (m *GRPCClientManager) Dial(ctx context.Context, serviceName, target string
 	}
 
 	m.conns[serviceName] = conn
-	logger.SysInfo("grpc_client", fmt.Sprintf("grpc: client connected to %s (%s)", serviceName, target))
 	return conn, nil
 }
 
@@ -156,6 +159,42 @@ func buildGRPCClientTLSConfig(cfg *config.GRPCCfg) (*tls.Config, error) {
 			return nil, fmt.Errorf("load client cert/key: %w", err)
 		}
 		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsCfg, nil
+}
+
+func buildGRPCServerTLSConfig(cfg *config.GRPCCfg) (*tls.Config, error) {
+	if cfg == nil {
+		return nil, errors.New("grpc: server tls config is nil")
+	}
+	if cfg.ServerCertPath == "" || cfg.ServerKeyPath == "" {
+		return nil, errors.New("grpc: server tls requires GRPC_SERVER_TLS_CERT and GRPC_SERVER_TLS_KEY")
+	}
+
+	serverCert, err := tls.LoadX509KeyPair(cfg.ServerCertPath, cfg.ServerKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("grpc: load server cert/key: %w", err)
+	}
+
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientAuth:   tls.VerifyClientCertIfGiven,
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	if cfg.DataPlaneClientCACertPath != "" {
+		caCert, err := os.ReadFile(cfg.DataPlaneClientCACertPath)
+		if err != nil {
+			return nil, fmt.Errorf("grpc: read dataplane client ca cert: %w", err)
+		}
+
+		pool := x509.NewCertPool()
+		if ok := pool.AppendCertsFromPEM(caCert); !ok {
+			return nil, errors.New("grpc: append dataplane client ca cert")
+		}
+
+		tlsCfg.ClientCAs = pool
 	}
 
 	return tlsCfg, nil

@@ -14,21 +14,23 @@ type Config struct {
 
 // AppCfg holds application-level settings.
 type AppCfg struct {
-	TimeZone string
-	HTTPPort int
-	LogLV    string
+	TimeZone  string
+	HTTPPort  int
+	LogLV     string
+	PublicURL string
 }
 
-// SecurityCfg holds authentication and token settings.
+// SecurityCfg holds authentication TTL settings and the root key used to encrypt DB-managed secret versions.
 type SecurityCfg struct {
-	AccessSecretKey string
 	AccessSecretTTL time.Duration
 
-	OneTimeTokenTTL    time.Duration
-	OneTimeTokenSecret string
+	OneTimeTokenTTL time.Duration
 
-	RefreshTokenSecret string
-	RefreshTokenTTL    time.Duration
+	RefreshTokenTTL time.Duration
+
+	DeviceActiveTTL time.Duration
+
+	MasterKey string
 }
 
 // PsqlCfg holds PostgreSQL connection parameters.
@@ -108,6 +110,19 @@ type VictoriaDBCfg struct {
 type GRPCCfg struct {
 	ServerPort string
 
+	// Inbound server TLS
+	ServerTLSEnabled bool
+	ServerCertPath   string
+	ServerKeyPath    string
+
+	// Dataplane mTLS issuer / verifier
+	DataPlaneClientCACertPath      string
+	DataPlaneClientCAKeyPath       string
+	DataPlaneEnrollToken           string
+	DataPlaneClientCertTTL         time.Duration
+	DataPlaneHeartbeatInterval     time.Duration
+	DataPlaneHeartbeatStaleTimeout time.Duration
+
 	// Client TLS
 	ClientTLSEnabled bool
 	ClientCACertPath string
@@ -119,17 +134,17 @@ type GRPCCfg struct {
 func LoadConfig() *Config {
 	return &Config{
 		App: AppCfg{
-			TimeZone: getEnv("APP_TIMEZONE", "UTC"),
-			HTTPPort: getEnvAsInt("APP_HTTP_PORT", 8080),
-			LogLV:    getEnv("APP_LOG_LEVEL", "info"),
+			TimeZone:  getEnv("APP_TIMEZONE", "UTC"),
+			HTTPPort:  getEnvAsInt("APP_HTTP_PORT", 8080),
+			LogLV:     getEnv("APP_LOG_LEVEL", "info"),
+			PublicURL: getEnv("APP_PUBLIC_URL", "http://localhost:8080"),
 		},
 		Security: SecurityCfg{
-			AccessSecretKey:    getEnv("JWT_SECRET_KEY", ""),
-			AccessSecretTTL:    15 * time.Minute,
-			OneTimeTokenTTL:    15 * time.Minute,
-			OneTimeTokenSecret: getEnv("OTT_SECRET", "dev"),
-			RefreshTokenSecret: getEnv("REFRESH_SECRET", "dev"),
-			RefreshTokenTTL:    168 * time.Hour,
+			AccessSecretTTL: 15 * time.Minute,
+			OneTimeTokenTTL: 15 * time.Minute,
+			RefreshTokenTTL: 168 * time.Hour,
+			DeviceActiveTTL: 168 * time.Hour,
+			MasterKey:       getEnv("CORE_SECRET_MASTER_KEY", ""),
 		},
 		Psql: PsqlCfg{
 			Host:          getEnv("PSQL_HOST", "localhost"),
@@ -179,11 +194,20 @@ func LoadConfig() *Config {
 			RetryInterval: getEnvAsDuration("VICTORIA_RETRY_INTERVAL", 2*time.Second),
 		},
 		GRPC: GRPCCfg{
-			ServerPort:       getEnv("GRPC_SERVER_PORT", "9090"),
-			ClientTLSEnabled: getEnvAsBool("GRPC_CLIENT_TLS_ENABLED", false),
-			ClientCACertPath: getEnv("GRPC_CLIENT_TLS_CA", ""),
-			ClientCertPath:   getEnv("GRPC_CLIENT_TLS_CERT", ""),
-			ClientKeyPath:    getEnv("GRPC_CLIENT_TLS_KEY", ""),
+			ServerPort:                     getEnv("GRPC_SERVER_PORT", "9090"),
+			ServerTLSEnabled:               getEnvAsBool("GRPC_SERVER_TLS_ENABLED", false),
+			ServerCertPath:                 getEnv("GRPC_SERVER_TLS_CERT", ""),
+			ServerKeyPath:                  getEnv("GRPC_SERVER_TLS_KEY", ""),
+			DataPlaneClientCACertPath:      getEnv("GRPC_DATAPLANE_CLIENT_CA", ""),
+			DataPlaneClientCAKeyPath:       getEnv("GRPC_DATAPLANE_CLIENT_CA_KEY", ""),
+			DataPlaneEnrollToken:           getEnv("GRPC_DATAPLANE_ENROLL_TOKEN", ""),
+			DataPlaneClientCertTTL:         getEnvAsDuration("GRPC_DATAPLANE_CLIENT_CERT_TTL", 30*24*time.Hour),
+			DataPlaneHeartbeatInterval:     getEnvAsDuration("GRPC_DATAPLANE_HEARTBEAT_INTERVAL", 30*time.Second),
+			DataPlaneHeartbeatStaleTimeout: getEnvAsDuration("GRPC_DATAPLANE_STALE_TIMEOUT", 2*time.Minute),
+			ClientTLSEnabled:               getEnvAsBool("GRPC_CLIENT_TLS_ENABLED", false),
+			ClientCACertPath:               getEnv("GRPC_CLIENT_TLS_CA", ""),
+			ClientCertPath:                 getEnv("GRPC_CLIENT_TLS_CERT", ""),
+			ClientKeyPath:                  getEnv("GRPC_CLIENT_TLS_KEY", ""),
 		},
 	}
 }
